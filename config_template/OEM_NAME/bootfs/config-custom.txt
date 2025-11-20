@@ -1,0 +1,60 @@
+[all]
+##################################################
+#             --DISPLAY SECTION--                #
+# tvservice -n                                   #
+# device_name=VSC-TD2220   --> [EDID=VSC-TD2220] #
+# oder:                                          #
+# cat /proc/cpuinfo                              #
+# Serial: 0000000012345678 --> [0x12345678]      #
+##################################################
+
+[EDID=MPI-MPI3508]
+#MPI3508 TFT 3,5"
+dtparam=spi=on
+dtoverlay=ads7846,cs=1,penirq=25,penirq_pull=2,speed=50000,keep_vref_on=0,swapxy=0,pmax=255,xohms=150,xmin=200,xmax=3900,ymin=200,ymax=3900
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=480 320 60 6 0 0 0
+config_hdmi_boost=7
+hdmi_force_hotplug=1
+hdmi_drive=2
+
+[EDID=MPI-MPI5008]
+#MPI5008 TFT 5"
+dtparam=spi=on
+dtoverlay=ads7846,cs=1,penirq=25,penirq_pull=2,speed=50000,keep_vref_on=0,swapxy=0,pmax=255,xohms=150,xmin=200,xmax=3900,ymin=200,ymax=3900
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=800 480 60 6 0 0 0
+config_hdmi_boost=7
+hdmi_force_hotplug=1
+hdmi_drive=1
+
+[all]
+
+#[0x12345678]
+##Official Raspberry TFT 7"
+#framebuffer_width=960
+#framebuffer_height=576
+#dtoverlay=rpi-ft5406
+#lcd_rotate=2
+
+#[0x12345678]
+##Waveshare Raspberry TFT 7"
+#framebuffer_width=960
+#framebuffer_height=576
+#dtoverlay=rpi-ft5406
+#lcd_rotate=2
+#display_lcd_rotate=2
+
+##################################################
+#                   --OTHERS--                   #
+##################################################
+
+[all]
+disable_splash=1
+avoid_warnings=1
+#dtoverlay=disable-wifi
+#dtoverlay=disable-bt
+
+[all]
