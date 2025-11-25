@@ -45,12 +45,12 @@ Configuration templates live in `config_template/`. Key templates include:
 Typical template layout (under `config_template/SYS_<flavor>/`):
 
 - `bootfs/` — files that will be copied to the FAT boot partition (e.g., `config.txt`, `config-custom.txt`, overlays)
-- `rootfs/` — a tree that will be placed into the root filesystem (e.g., `home/pi/install_all.sh`, `home/pi/deb_file.deb`)
+- `rootfs/` — a tree that will be placed into the root filesystem (e.g., `home/pi/auto-installer.sh`, `home/pi/deb_file.deb`)
 
 Typical OEM template layout (under `config_template/OEM_<flavor>/`):
 
 - `bootfs/` — files that will be copied to the FAT boot partition (e.g., `config-custom.txt`)
-- `rootfs/` — a tree that will be placed into the root filesystem (e.g., `CONFIG/setup/install_all.sh`, `CONFIG/setup/deb_file.deb`)
+- `rootfs/` — a tree that will be placed into the root filesystem (e.g., `CONFIG/setup/auto-installer.sh`, `CONFIG/setup/deb_file.deb`)
 
 Edit or copy a template to create a custom build. Keep paths relative in templates so the builder can copy them into images.
 
@@ -75,7 +75,7 @@ Define what goes into `bootfs` and `rootfs` within a template. Common items:
 - `bootfs/config.txt` — main boot configuration for Raspberry Pi
 - `bootfs/config-custom.txt` — additional include file the builder appends
 - `bootfs/overlays/*.dtbo` — device tree overlays required by hardware
-- `rootfs/home/pi/install_all.sh` — post-install or first-boot scripts to prepare the kiosk environment
+- `rootfs/home/pi/auto-installer.sh` — post-install or first-boot scripts to prepare the kiosk environment
 
 Keep template files minimal and idempotent; scripts under `rootfs` should be safe to re-run.
 
@@ -112,7 +112,7 @@ sudo dd if=release/kiosk_sys_full.img of=/dev/sdX bs=4M status=progress conv=fsy
 ## ⚠️ Safety & recommendations
 
 - Always test builds on a spare SD card or VM before deploying to production kiosks.
-- Review `config_template/*/bootfs/config-custom.txt` and any `install_all.sh` scripts before building — they may contain device-specific or destructive commands.
+- Review `config_template/*/bootfs/config-custom.txt` and any `auto-installer.sh` scripts before building — they may contain device-specific or destructive commands.
 - Use a disposable test environment when automating packaging or releases.
 
 ---
