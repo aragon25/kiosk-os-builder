@@ -9,7 +9,7 @@
 export LC_ALL=C
 export LANG=C
 SCRIPT_TITLE="build image"
-SCRIPT_VERSION="1.3"
+SCRIPT_VERSION="1.3.1"
 SCRIPTDIR="$(readlink -f "$0")"
 SCRIPTNAME="$(basename "$SCRIPTDIR")"
 SCRIPTBASENAME="$(basename "$SCRIPTDIR" ".sh")"
