@@ -32,20 +32,23 @@ hdmi_drive=1
 
 [all]
 
-#[0x12345678]
-##Official Raspberry TFT 7"
+##Official Raspberry 7inch DSI LCD v1
 #framebuffer_width=960
 #framebuffer_height=576
 #dtoverlay=rpi-ft5406
 #lcd_rotate=2
 
-#[0x12345678]
-##Waveshare Raspberry TFT 7"
+##Waveshare Raspberry 7inch DSI LCD 800x480 
 #framebuffer_width=960
 #framebuffer_height=576
 #dtoverlay=rpi-ft5406
 #lcd_rotate=2
 #display_lcd_rotate=2
+
+##Waveshare Raspberry 7inch DSI LCD (C) 1024x600
+#dtoverlay=vc4-kms-v3d
+#max_framebuffers=2
+#dtoverlay=vc4-kms-dsi-waveshare-panel,7_0_inchC,i2c1,rotation=180,invx,invy
 
 ##################################################
 #                   --OTHERS--                   #
