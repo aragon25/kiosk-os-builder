@@ -1,0 +1,16 @@
+[Unit]
+Description=Kiosk-OS-Configurator: import settings, clear logs and disable swapfile in ram mode
+DefaultDependencies=no
+Before=sysinit.target
+Requires=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/kiosk-os-configurator --preserv
+ExecStart=/usr/bin/kiosk-os-configurator --service
+User=root
+
+[Install]
+WantedBy=sysinit.target
+Alias=kiosk-os.service
