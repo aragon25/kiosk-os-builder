@@ -7,7 +7,7 @@
 
 #get some variables
 SCRIPT_TITLE="kiosk-os"
-SCRIPT_VERSION="1.5"
+SCRIPT_VERSION="1.4"
 SCRIPTDIR="$(readlink -f "$0")"
 SCRIPTNAME="$(basename "$SCRIPTDIR")"
 SCRIPTDIR="$(dirname "$SCRIPTDIR")"

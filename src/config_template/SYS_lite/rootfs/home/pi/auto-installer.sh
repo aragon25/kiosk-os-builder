@@ -6,7 +6,7 @@
 ##############################################
 
 SCRIPT_TITLE="auto-installer"
-SCRIPT_VERSION="1.2"
+SCRIPT_VERSION="1.3"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -541,9 +541,10 @@ deb_setup() {
         deb_arch=$(dpkg-deb -f "$entry" Architecture 2>/dev/null)
         deb_ver=$(dpkg-deb -f "$entry" Version 2>/dev/null)
         inst_ver=$(dpkg -s -- "$deb_pkg" 2>/dev/null | awk '/^Version:/{print $2}')
+        inst_stat=$(dpkg -s -- "$deb_pkg" 2>/dev/null | awk '/^Status:/{print $4}')
         if [[ -z "$deb_pkg" ]] || [[ -z "$deb_arch" ]] || [[ -z "$deb_ver" ]]; then
           handle_error "1" "Package error: $deb_file (missing Package/Architecture/Version) ! abort."
-        elif [ "$deb_arch" = "$SYS_ARCH" ] || [ "$deb_arch" = "all" ]; then
+        elif [[ "$deb_arch" == "$SYS_ARCH" ]] || [[ "$deb_arch" == "all" ]]; then
           if [[ -n "$force" ]] && [[ -z "$1" ]]; then
             [ -z "$quiet" ] && echo "--> force install: $deb_file ..."
             if [ -z "$verbose" ]; then
@@ -560,9 +561,9 @@ deb_setup() {
               apt-get remove -qq -- "$deb_pkg"
             fi
             [ $? -ne 0 ] && handle_error "1" "deinstall error: $deb_file ! abort."
-          elif [[ -n "$inst_ver" ]] && dpkg --compare-versions "$deb_ver" eq "$inst_ver" && [[ -z "$1" ]]; then
+          elif [[ "$inst_stat" == "installed" ]] && [[ -n "$inst_ver" ]] && dpkg --compare-versions "$deb_ver" le "$inst_ver" && [[ -z "$1" ]]; then
             [ -z "$quiet" ] && echo "Skipping installation (up-to-date): $deb_file"
-          elif ( [[ -z "$inst_ver" ]] || dpkg --compare-versions "$deb_ver" gt "$inst_ver" ) && [[ -z "$1" ]]; then
+          elif ( [[ -z "$inst_ver" ]] || [[ "$inst_stat" != "installed" ]] || dpkg --compare-versions "$deb_ver" gt "$inst_ver" ) && [[ -z "$1" ]]; then
             [ -z "$quiet" ] && echo "--> install: $deb_file ..."
             if [ -z "$verbose" ]; then
               apt-get install -qq -- "$entry" >/dev/null 2>&1
@@ -570,9 +571,9 @@ deb_setup() {
               apt-get install -qq -- "$entry"
             fi
             [ $? -ne 0 ] && handle_error "1" "install error: $deb_file ! abort."
-          elif [[ -z "$inst_ver" ]] && [ "$1" == "-d" ]; then
+          elif [[ "$inst_stat" != "installed" ]] && [ "$1" == "-d" ]; then
             [ -z "$quiet" ] && echo "Skipping (not installed): $deb_file"
-          elif [[ -n "$inst_ver" ]] && [ "$1" == "-d" ]; then
+          elif [[ -n "$inst_ver" ]] && [[ "$inst_stat" == "installed" ]] && [ "$1" == "-d" ]; then
             [ -z "$quiet" ] && echo "--> deinstall: $deb_file ..."
             if [ -z "$verbose" ]; then
               apt-get remove -qq -- "$deb_pkg" >/dev/null 2>&1
