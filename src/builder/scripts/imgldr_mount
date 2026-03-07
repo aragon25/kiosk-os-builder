@@ -1,0 +1,381 @@
+# Local filesystem mounting      -*- shell-script -*-
+
+#
+# This script overrides local_mount_root() in /scripts/local
+# and mounts root as a read-only filesystem with a temporary (rw)
+# overlay image filesystem.
+#
+
+. /scripts/local
+
+pretty_text() {
+  printf '%s\n%s  %-30s  %s\n' "######################################" "##" "" "##"
+  for i in "${@}"; do
+    printf "%s  %-30s  %s\n" "##" "$i" "##"
+  done
+  printf '%s  %-30s  %s\n%s\n' "##" "" "##" "######################################"
+}
+
+shell_console() {
+  if command -v setsid >/dev/null 2>&1; then
+    read -r console rest </proc/consoles
+    if [ "${console}" = "tty0" ]; then
+      console="tty1"
+    fi
+    setsid sh -c "exec sh -i <>/dev/${console} 1>&0 2>&1"
+  else
+    sh -i </dev/console >/dev/console 2>&1
+  fi
+}
+
+panic_pretty() {
+  [ $# -ne 0 ] && pretty_text "${@}"
+  local response="x"
+  echo " "
+  echo "What would you do?"
+  echo "enter console? (c), reboot? (r), poweroff? (p)"
+  while [ "${response}" != "c" ] && [ "${response}" != "r" ] && [ "${response}" != "p" ]; do
+    read -n 1 -s response
+  done
+  if [ "$response" = "c" ]; then
+    shell_console
+  fi
+  if [ "$response" = "r" ]; then
+    echo "Reboot in 5 seconds..."
+    sleep 5
+    reboot -f
+  fi
+  if [ "$response" = "p" ]; then
+    echo "Power off in 5 seconds..."
+    sleep 5
+    poweroff -f
+  fi
+}
+
+local_mount_root()
+{
+  local_top
+  if [ -z "${ROOT}" ]; then
+    panic_pretty "     !!! KERNEL PANIC !!!" "  No root device specified." " Boot arguments must include" "      a root= parameter."
+  fi
+  local_device_setup "${ROOT}" "root file system"
+  ROOT="${DEV}"
+  local ROOT_DEV="${ROOT}"
+  local BOOT_DEV="${ROOT%?}1"
+  local filepath
+  local filename
+  local restored_boot
+  local response
+  local boot_bak
+  local boot_dir
+  local overlay_mod
+  local overlay_mnt
+
+  # Get the root filesystem type if not set
+  if [ -z "${ROOTFSTYPE}" ] || [ "${ROOTFSTYPE}" = auto ]; then
+    FSTYPE=$(get_fstype "${ROOT_DEV}")
+  else
+    FSTYPE=${ROOTFSTYPE}
+  fi
+
+  local_premount
+
+  modprobe ${FSTYPE}
+  checkfs ${ROOT} root "${FSTYPE}"
+
+  # Create directories for mountpoints
+  mkdir -p /mnt/tmproot /mnt/tmpboot /mnt/syssqfs /mnt/sysoverlay
+  mkdir -p /mnt/sysoverlay/usr /mnt/sysoverlay/home /mnt/sysoverlay/var /mnt/sysoverlay/etc
+
+  # Mount rootfs to /mnt/tmproot
+  if [ "${FSTYPE}" != "unknown" ]; then
+    if ! mount -t ${FSTYPE} ${ROOT_DEV} /mnt/tmproot >/dev/null 2>&1; then
+      panic_pretty "     !!! KERNEL PANIC !!!" "       Failed to mount" "      root file system!" "${ROOT_DEV}"
+    fi
+  else
+    if ! mount ${ROOT_DEV} /mnt/tmproot >/dev/null 2>&1; then
+      panic_pretty "     !!! KERNEL PANIC !!!" "       Failed to mount" "      root file system!" "${ROOT_DEV}"
+    fi
+  fi
+
+  # Mount bootfs to /mnt/tmpboot
+  if ! mount ${BOOT_DEV} /mnt/tmpboot >/dev/null 2>&1; then
+    panic_pretty "     !!! KERNEL PANIC !!!" "       Failed to mount" "      boot file system!" "${BOOT_DEV}"
+  fi
+
+  # Build rootfs base directory structure
+  mkdir -p /mnt/tmproot/CONFIG /mnt/tmproot/IMAGES /mnt/tmproot/USERDATA /mnt/tmproot/STATIC
+  mkdir -p /mnt/tmproot/USERDATA/PERSIST_RAM /mnt/tmproot/USERDATA/OVERLAY/etc /mnt/tmproot/USERDATA/OVERLAY/home /mnt/tmproot/USERDATA/OVERLAY/var
+  chown -fR 0:0 /mnt/tmproot/CONFIG /mnt/tmproot/IMAGES /mnt/tmproot/STATIC
+  chmod -fR u=rwX,g=rX,o=rX /mnt/tmproot/CONFIG /mnt/tmproot/IMAGES
+  chmod -fR u=rwX,g=X,o=X /mnt/tmproot/STATIC
+  chown -f 0:0 /mnt/tmproot/USERDATA
+  chmod -f u=rwX,g=rX,o=rX /mnt/tmproot/USERDATA
+  chown -f 0:0 /mnt/tmproot/USERDATA/PERSIST_RAM
+  chmod -f u=rwX,g=rwX,o=rX /mnt/tmproot/USERDATA/PERSIST_RAM
+  chown -f 0:0 /mnt/tmproot/USERDATA/OVERLAY
+  chmod -f u=rwX,g=rX,o=rX /mnt/tmproot/USERDATA/OVERLAY
+  chown -f 0:0 /mnt/tmproot/USERDATA/OVERLAY/etc
+  chmod -f u=rwX,g=rX,o=rX /mnt/tmproot/USERDATA/OVERLAY/etc
+  chown -f 0:0 /mnt/tmproot/USERDATA/OVERLAY/home
+  chmod -f u=rwX,g=rX,o=rX /mnt/tmproot/USERDATA/OVERLAY/home
+  chown -f 0:0 /mnt/tmproot/USERDATA/OVERLAY/var
+  chmod -f u=rwX,g=rX,o=rX /mnt/tmproot/USERDATA/OVERLAY/var
+
+  # Mount system.sqfs image
+  if ! mount -t squashfs /mnt/tmproot/IMAGES/system.sqfs /mnt/syssqfs; then
+    panic_pretty "     !!! KERNEL PANIC !!!" "       Failed to mount" " {ROOT_DEV}/IMAGES/system.sqfs" "     as root file system."
+  fi
+
+  #Restore boot partition if needed
+  if [ "$IMGLDR_MODE" != "DEVELOPER" ]; then
+    if [ -d /mnt/syssqfs/BOOT ]; then
+      for filepath in /mnt/syssqfs/BOOT/*; do
+        filename=$(basename "${filepath}")
+        if [ -f "${filepath}" ] && ! diff "${filepath}" "/mnt/tmpboot/${filename}" >/dev/null 2>&1; then
+          [ -z "${restored_boot}" ] && pretty_text "Restore boot partition data..." "      Then Rebooting..." "" && echo " "
+          cp -f "${filepath}" "/mnt/tmpboot/${filename}"
+          restored_boot="y"
+        fi
+      done
+      for filepath in /mnt/syssqfs/BOOT/overlays/*; do
+        filename=$(basename "${filepath}")
+        if [ -f "${filepath}" ] && ! diff "${filepath}" "/mnt/tmpboot/overlays/${filename}" >/dev/null 2>&1; then
+          [ -z "${restored_boot}" ] && pretty_text "Restore boot partition data..." "      Then Rebooting..." "" && echo " "
+          cp -f "${filepath}" "/mnt/tmpboot/overlays/${filename}"
+          restored_boot="y"
+        fi
+      done
+      if [ -n "${restored_boot}" ]; then
+        sync >/dev/null 2>&1
+        umount /mnt/syssqfs >/dev/null 2>&1
+        umount /mnt/tmproot >/dev/null 2>&1
+        umount /mnt/tmpboot >/dev/null 2>&1
+        echo "... FINISHED! Rebooting..."
+        sleep 3
+        reboot -f
+      fi
+    else
+      panic_pretty "     !!! KERNEL PANIC !!!" "    BOOT folder not found!" "   boot partition might be" "          outdated..." "${BOOT_DEV}"
+    fi
+  fi
+
+  #Umount boot partition
+  sync >/dev/null 2>&1
+  umount /mnt/tmpboot >/dev/null 2>&1
+
+  # Check overlay module
+  if ! modprobe overlay; then
+    overlay_mod="/mnt/syssqfs/SYSTEM/lib/modules/$(uname -r)/kernel/fs/overlayfs/overlay.ko"
+    [ -f "${overlay_mod}" ] && insmod "${overlay_mod}"
+  fi
+  if ! modprobe overlay; then
+    panic_pretty "     !!! KERNEL PANIC !!!" "    Failed to load overlay" "        kernel module"
+  fi
+
+  # Mount the overlay in /mnt/overlay
+  if [ -z "${DEVMODE}" ] || [ -n "${FIRSTBOOT}" ]; then
+    if [ -n "${SAVEDBOOT}" ]; then
+      mount -o bind /mnt/tmproot/OVERLAY /mnt/overlay
+      echo "1" > /mnt/tmproot/STATIC/savedboot
+    else
+      mount -t tmpfs tmpfs /mnt/overlay
+      [ -f /mnt/tmproot/STATIC/savedboot ] && RESET_OFS=y
+    fi
+    [ -f /mnt/tmproot/STATIC/setupboot ] && RESET_OFS=y
+    if [ -n "${RESET_OFS}" ] || [ -n "${RESET_ALL}" ]; then
+      pretty_text "" " ...Restoring factory data..." ""
+      echo " "
+      ls "/mnt/tmproot/OVERLAY/"* >/dev/null 2>&1 && echo "Delete saved overlay data..." && find /mnt/tmproot/OVERLAY -maxdepth 1 -mindepth 1 -exec rm -rf {} \;
+      [ -e /mnt/tmproot/SETUP ] && echo "Delete saved SETUP data..." && rm -rf /mnt/tmproot/SETUP
+      [ -n "${RESET_ALL}" ] && ls "/mnt/tmproot/STORAGE/"* >/dev/null 2>&1 && echo "Delete STORAGE data..." && find /mnt/tmproot/STORAGE -maxdepth 1 -mindepth 1 -exec rm -rf {} \;
+      [ -f /mnt/tmproot/STATIC/savedboot ] && rm -f /mnt/tmproot/STATIC/savedboot
+      [ -f /mnt/tmproot/STATIC/setupboot ] && rm -f /mnt/tmproot/STATIC/setupboot
+      sed -i 's|RESET_OFS[^ ]* \{0,1\}||g' /mnt/tmpboot/cmdline.txt >/dev/null 2>&1
+      sed -i 's|RESET_ALL[^ ]* \{0,1\}||g' /mnt/tmpboot/cmdline.txt >/dev/null 2>&1
+      sed -i 's|[ \t]*$||' /mnt/tmpboot/cmdline.txt
+      echo "... FINISHED! Continue booting..."
+    fi
+  elif [ -n "${DEVMODE}" ]; then
+    pretty_text "       !!! WARNING !!!" "     YOU ARE IN SETUP MODE" ""
+    echo " "
+    [ -f /mnt/tmproot/IMAGES/oem.sqfs ] && echo "INFO: oem.sqfs image file is ignored in this mode!"
+    if [ -n "${DEVMODE}" ] && [ -n "${SAVEDBOOT}" ]; then
+      echo "Exiting saved boot..."
+      sed -i 's|SAVEDBOOT[^ ]* \{0,1\}||g' /mnt/tmpboot/cmdline.txt >/dev/null 2>&1
+      sed -i 's|[ \t]*$||' /mnt/tmpboot/cmdline.txt
+      ls "/mnt/tmproot/OVERLAY/"* >/dev/null 2>&1 && echo "Delete saved overlay data..." && find /mnt/tmproot/OVERLAY -maxdepth 1 -mindepth 1 -exec rm -rf {} \;
+      [ -f /mnt/tmproot/STATIC/savedboot ] && rm -f /mnt/tmproot/STATIC/savedboot
+      sync >/dev/null 2>&1
+      umount /mnt/overlay >/dev/null 2>&1
+      umount /mnt/oemimg >/dev/null 2>&1
+      umount /mnt/sysimg >/dev/null 2>&1
+      umount /mnt/tmproot >/dev/null 2>&1
+      umount /mnt/tmpboot >/dev/null 2>&1
+      echo "Rebooting in 5 seconds..."
+      sleep 5
+      reboot -f
+    fi
+    echo "1" > /mnt/tmproot/STATIC/setupboot
+    mkdir -p /mnt/tmproot/SETUP
+    if ls "/mnt/tmproot/SETUP/"* >/dev/null 2>&1; then
+      response="x"
+      echo "SETUP data was found! what would you like to do with that?"
+      echo "ignore? (i), remove? (r), exit DEVMODE? (e), console? (c), finish it and poweroff? (f)"
+      while [ "${response}" != "i" ] && [ "${response}" != "r" ] && [ "${response}" != "e" ] && [ "${response}" != "c" ] && [ "${response}" != "f" ]; do
+        read -n 1 -s response
+      done
+      if [ "$response" = "i" ]; then
+        echo " "
+        echo "Ignoring data and continue boot..."
+      fi
+      if [ "$response" = "r" ]; then
+        echo " "
+        echo "Delete saved SETUP data..."
+        [ -e /mnt/tmproot/SETUP ] && rm -rf /mnt/tmproot/SETUP
+        mkdir -p /mnt/tmproot/SETUP
+      fi
+      if [ "$response" = "e" ]; then
+        echo " "
+        echo "Exiting DEVMODE..."
+        sed -i 's|DEVMODE[^ ]* \{0,1\}||g' /mnt/tmpboot/cmdline.txt >/dev/null 2>&1
+        sed -i 's|[ \t]*$||' /mnt/tmpboot/cmdline.txt
+        [ -e /mnt/tmproot/SETUP ] && rm -rf /mnt/tmproot/SETUP
+      fi
+      if [ "$response" = "f" ]; then
+        echo " "
+        echo "Check OEM Setup data..."
+        if ls "/mnt/tmproot/SETUP/data/"* >/dev/null 2>&1; then
+          if [ -e /mnt/tmproot/OEM ]; then
+            echo "Old OEM folder was found! what would you like to do?"
+            echo "remove? (r), console? (c), abort? (a)"
+            while [ "${response}" != "r" ] && [ "${response}" != "a" ] && [ "${response}" != "c" ]; do
+              read -n 1 -s response
+            done
+            if [ "$response" = "r" ]; then
+              echo "Delete old OEM folder..."
+              rm -rf /mnt/tmproot/OEM
+              response="f"
+            elif [ "$response" = "a" ]; then
+              echo "Abort..."
+            fi
+          fi
+          if [ "$response" = "f" ]; then
+            echo "Prepare OEM folder..."
+            mv -f /mnt/tmproot/SETUP/data /mnt/tmproot/OEM
+            rm -rf /mnt/tmproot/SETUP
+          fi
+        fi
+      fi
+      if [ "$response" = "c" ]; then
+        shell_console
+      fi
+      sync >/dev/null 2>&1
+      if [ "$response" != "i" ]; then
+        umount /mnt/overlay >/dev/null 2>&1
+        umount /mnt/oemimg >/dev/null 2>&1
+        umount /mnt/sysimg >/dev/null 2>&1
+        umount /mnt/tmproot >/dev/null 2>&1
+        umount /mnt/tmpboot >/dev/null 2>&1
+      fi
+      if [ "$response" != "i" ] && [ "$response" != "f" ]; then
+        echo "Rebooting in 5 seconds..."
+        sleep 5
+        reboot -f
+      fi
+      if [ "$response" = "f" ]; then
+        echo "Power off in 5 seconds..."
+        sleep 5
+        poweroff -f
+      fi
+    fi
+    mount -o bind /mnt/tmproot/SETUP /mnt/overlay
+    sleep 3
+  fi
+  [ -d /mnt/overlay/work ] && rm -rf /mnt/overlay/work
+  mkdir -p /mnt/overlay/data /mnt/overlay/work
+
+  # Mount the final overlay-root in $rootmnt
+  if ! mount -t overlay \
+     -olowerdir=${overlay_mnt},upperdir=/mnt/overlay/data,workdir=/mnt/overlay/work \
+     overlay ${rootmnt}; then
+    panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount overlayfs" " as root overlay file system"
+  fi
+
+  #copy version info to overlay
+  mkdir -p ${rootmnt}/etc/imageinfo
+  [ -f /mnt/sysimg/INFO/sysinfo ] && cp -f /mnt/sysimg/INFO/sysinfo ${rootmnt}/etc/imageinfo/sysinfo
+  [ -f /mnt/oemimg/INFO/oeminfo ] && cp -f /mnt/oemimg/INFO/oeminfo ${rootmnt}/etc/imageinfo/oeminfo
+  [ -f /mnt/sysimg/INFO/updateserver ] && cp -f /mnt/sysimg/INFO/updateserver ${rootmnt}/etc/imageinfo/updateserver
+
+  # Configuring fstab in overlay
+  mkdir -p ${rootmnt}/mnt/rootfs
+  rm -rf ${rootmnt}/STORAGE ${rootmnt}/IMAGES ${rootmnt}/CONFIG ${rootmnt}/STATIC
+  mkdir -p ${rootmnt}/STORAGE ${rootmnt}/IMAGES ${rootmnt}/CONFIG ${rootmnt}/STATIC
+  chown -f 0:0 ${rootmnt}/STORAGE ${rootmnt}/IMAGES ${rootmnt}/CONFIG ${rootmnt}/STATIC
+  chmod -f u=rwX,g=rwX,o=rwX ${rootmnt}/STORAGE
+  chmod -f u=rwX,g=rX,o=rX ${rootmnt}/IMAGES ${rootmnt}/CONFIG ${rootmnt}/STATIC
+
+  local fstab_boot=$(cat ${rootmnt}/etc/fstab 2>/dev/null)
+  [ -z "${fstab_boot##*\/boot\/firmware*}" ] && boot_dir="/boot/firmware" || boot_dir="/boot"
+  echo "proc                   /proc           proc    defaults                      0       0" > ${rootmnt}/etc/fstab
+  echo "${BOOT_DEV}            ${boot_dir}     vfat    defaults                      0       0" >> ${rootmnt}/etc/fstab
+  echo "${ROOT_DEV}            /mnt/rootfs     ${FSTYPE}    defaults,noatime         0       0" >> ${rootmnt}/etc/fstab
+  echo "/mnt/rootfs/STORAGE    /STORAGE        auto    defaults,noatime,bind         0       0" >> ${rootmnt}/etc/fstab
+  echo "/mnt/rootfs/IMAGES     /IMAGES         auto    defaults,noatime,bind         0       0" >> ${rootmnt}/etc/fstab
+  echo "/mnt/rootfs/CONFIG     /CONFIG         auto    defaults,noatime,bind         0       0" >> ${rootmnt}/etc/fstab
+  echo "/mnt/rootfs/STATIC     /STATIC         auto    defaults,noatime,bind         0       0" >> ${rootmnt}/etc/fstab
+
+  # sync plymouth-rpi-spinner with fbsplash
+  local splashimg="splash.png"
+  local splashpth="/etc/splash"
+  #[ -f "${rootmnt}/usr/lib/rpi-kiosk/kiosk-splash/splash.config" ] && splashpth="${rootmnt}/usr/lib/rpi-kiosk/kiosk-splash"
+  #[ -f "${rootmnt}/etc/splash/splash.config" ] && splashpth="${rootmnt}/etc/splash"
+  #[ -f "/mnt/tmproot/CONFIG/initramfs-splash/splash.config" ] && splashpth="/mnt/tmproot/CONFIG/initramfs-splash"
+  [ -f "$splashpth/splash.config" ] && SPLASH_IMG=$(awk -F '=' '/^imagefile/{print $2}' "$splashpth/splash.config")
+  [ "$SPLASH_IMG" != "" ] && splashimg="$SPLASH_IMG"
+  if [ -f "$splashpth/$splashimg" ] && ls "${rootmnt}/usr/share/plymouth/themes/rpi-spinner/"* >/dev/null 2>&1; then
+    cp -f "$splashpth/$splashimg" "${rootmnt}/usr/share/plymouth/themes/rpi-spinner/$splashimg"
+    sed -i "s/LOGO.PNG/${splashimg}/g" "${rootmnt}/usr/share/plymouth/themes/rpi-spinner/rpi-spinner.script"
+  fi
+
+  # Configuring custom-plymouth
+  if ls "/mnt/tmproot/CONFIG/plymouth-splash/"* >/dev/null 2>&1 && [ -z "${DEVMODE}" ]; then
+    local plymouth_themename=''
+    for filepath in "/mnt/tmproot/CONFIG/plymouth-splash/"*".plymouth"; do
+      plymouth_themename="$(basename "${filepath}" .plymouth)"
+      [ "${plymouth_themename}" = '*' ] && plymouth_themename=''
+    done
+    if [ "${plymouth_themename}" != '' ]; then
+      rm -rf "${rootmnt}/usr/share/plymouth/themes/${plymouth_themename}" >/dev/null 2>&1
+      mkdir -p "${rootmnt}/usr/share/plymouth/themes/${plymouth_themename}"
+      find /mnt/tmproot/CONFIG/plymouth-splash -maxdepth 1 -mindepth 1 -exec cp -arf {} "${rootmnt}/usr/share/plymouth/themes/${plymouth_themename}" \;
+      echo "[Daemon]" > ${rootmnt}/etc/plymouth/plymouthd.conf
+      echo "Theme=${plymouth_themename}" >> ${rootmnt}/etc/plymouth/plymouthd.conf
+    fi
+  fi
+
+  # hwclock_fix
+  if [ ! -f "/mnt/tmproot/STATIC/fake-hwclock" ]; then
+    if [ -f "/etc/date/fake-hwclock" ]; then 
+      cp -f "/etc/date/fake-hwclock" "/mnt/tmproot/STATIC/fake-hwclock"
+    else
+      echo "2025-06-01 15:20:00" > "/mnt/tmproot/STATIC/fake-hwclock"
+    fi
+  fi
+  if [ ! -f "/mnt/tmproot/STATIC/clock" ]; then
+    if [ -f "/etc/date/clock" ]; then 
+      cp -f "/etc/date/clock" "/mnt/tmproot/STATIC/clock"
+    else
+      echo "1748784000" > "/mnt/tmproot/STATIC/clock" #date -d "2025-06-01 15:20:00" +%s
+    fi
+  fi
+  if [ -f "${rootmnt}/etc/fake-hwclock.data" ]; then
+    rm -f "${rootmnt}/etc/fake-hwclock.data"
+    ln -s "/STATIC/fake-hwclock" "${rootmnt}/etc/fake-hwclock.data"
+  fi
+  if [ -f "${rootmnt}/var/lib/systemd/clock" ]; then
+    rm -f "${rootmnt}/var/lib/systemd/clock"
+    ln -s "/STATIC/clock" "${rootmnt}/var/lib/systemd/clock"
+  fi
+}

@@ -1,0 +1,292 @@
+#!/bin/sh
+
+PREREQ=""
+prereqs()
+{
+	echo "$PREREQ"
+}
+case $1 in
+# get pre-requisites
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+
+ROOT_CMDLINE="___ROOT_CMDLINE___"
+ROOT_DEV="___ROOT_DEV___"
+BOOT_DEV="___BOOT_DEV___"
+ROOT_MOUNT="false"
+BOOT_MOUNT="false"
+SQFS_MOUNT="false"
+SYSTEM_UPDATED="false"
+IMGLDR_MODE="RAMDISK"
+RESET_USERDATA="false"
+FIRSTBOOT=no
+
+wait_for_udev() {
+  command -v udevadm >/dev/null 2>&1 || return 0
+  udevadm settle ${1:+--timeout=$1}
+}
+
+get_cmdline() {
+  for x in $(cat /proc/cmdline)
+  do
+    case $x in
+      root=*)
+        ROOT_CMDLINE=${x#root=}
+      ;;
+      FIRSTBOOT|*firstboot*|resize)
+        FIRSTBOOT=yes
+      ;;
+    esac
+  done
+}
+
+pretty_text() {
+  printf '%s\n%s  %-30s  %s\n' "######################################" "##" "" "##"
+  for i in "${@}"; do
+    printf "%s  %-30s  %s\n" "##" "$i" "##"
+  done
+  printf '%s  %-30s  %s\n%s\n' "##" "" "##" "######################################"
+}
+
+shell_console() {
+  if command -v setsid >/dev/null 2>&1; then
+    read -r console rest </proc/consoles
+    if [ "${console}" = "tty0" ]; then
+      console="tty1"
+    fi
+    setsid sh -c "exec sh -i <>/dev/${console} 1>&0 2>&1"
+  else
+    sh -i </dev/console >/dev/console 2>&1
+  fi
+}
+
+panic_pretty() {
+  [ $# -ne 0 ] && pretty_text "${@}"
+  local response="x"
+  echo " "
+  echo "What would you do?"
+  echo "enter console? (c), reboot? (r), poweroff? (p)"
+  while [ "${response}" != "c" ] && [ "${response}" != "r" ] && [ "${response}" != "p" ]; do
+    read -n 1 -s response
+  done
+  if [ "$response" = "c" ]; then
+    shell_console
+  fi
+  if [ "$response" = "r" ]; then
+    echo "Reboot in 5 seconds..."
+    sleep 5
+    reboot -f
+  fi
+  if [ "$response" = "p" ]; then
+    echo "Power off in 5 seconds..."
+    sleep 5
+    poweroff -f
+  fi
+}
+
+get_devices() {
+  if [ "$ROOT_CMDLINE" = "___ROOT_CMDLINE___" ]; then
+    panic_pretty "     !!! KERNEL PANIC !!!" "  No root device specified." " Boot arguments must include" "      a root= parameter."
+  fi
+  wait_for_udev 10
+  n=0
+  while [ "$n" -lt 10 ]; do
+    case "$ROOT_CMDLINE" in
+      LABEL=* | UUID=* | PARTLABEL=* | PARTUUID=*)
+        ROOT_DEV="$(blkid -l -t "$ROOT_CMDLINE" -o device)" || ROOT_DEV="___ROOT_DEV___"
+      ;;
+    esac
+    if [ "$ROOT_DEV" != "___ROOT_DEV___" ]; then
+      BOOT_DEV="${ROOT_DEV%?}1"
+      [ "$(blkid -o value -s TYPE $BOOT_DEV 2>/dev/null)" != "vfat" ] && BOOT_DEV="___BOOT_DEV___"
+      break
+    fi
+    n=$((n+1))
+    sleep 1.0
+  done
+}
+
+mount_fs() {
+  if [ "$ROOT_DEV" != "___ROOT_DEV___" ]; then
+    mkdir -p /mnt/tmproot
+    if ! mount -w "$ROOT_DEV" /mnt/tmproot; then
+      echo "... WARNING: IMGLDR FAILED TO MOUNT ROOTFS ..."
+    else
+      ROOT_MOUNT="true"
+    fi
+  else
+    echo "... WARNING: IMGLDR FAILED TO FIND ROOTFS PARTITION ..."
+  fi
+  if [ "$BOOT_DEV" != "___BOOT_DEV___" ]; then 
+    mkdir -p /mnt/tmpboot
+    if ! mount -w $BOOT_DEV /mnt/tmpboot; then
+      echo "... WARNING: IMGLDR FAILED TO MOUNT BOOTFS ..."
+    else
+      BOOT_MOUNT="true"
+    fi
+  else
+    echo "... WARNING: IMGLDR FAILED TO FIND BOOTFS PARTITION ..."
+  fi
+}
+
+umount_fs() {
+  local attempt=1
+  sync >/dev/null 2>&1
+  while [ "$SQFS_MOUNT" = "true" ] && [ $attempt -le 30 ]; do
+    umount /mnt/syssqfs >/dev/null 2>&1 && SQFS_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
+  done
+  attempt=1
+  while [ "$ROOT_MOUNT" = "true" ] && [ $attempt -le 30 ]; do
+    umount /mnt/tmproot >/dev/null 2>&1 && ROOT_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
+  done
+  attempt=1
+  while [ "$BOOT_MOUNT" = "true" ] && [ $attempt -le 30 ]; do
+    umount /mnt/tmpboot >/dev/null 2>&1 && BOOT_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
+  done
+  [ "$SQFS_MOUNT" = "true" ] && echo "Could not umount: /mnt/syssqfs"
+  [ "$ROOT_MOUNT" = "true" ] && echo "Could not umount: /mnt/tmproot"
+  [ "$BOOT_MOUNT" = "true" ] && echo "Could not umount: /mnt/tmpboot"
+}
+
+auto_reboot_addon() {
+  [ "$ROOT_MOUNT" != "true" ] && return 0
+  if [ -f "/mnt/tmproot/STATIC/auto-reboot-service_reboot" ] || [ -f "/mnt/tmproot/USERDATA/OVERLAY/etc/auto-reboot-service_reboot" ]; then
+    pretty_text "     !!! INFORMATION !!!" "    Unrecognized shutdown" "          appeared!" "    Rebooting once now..."
+    rm -f /mnt/tmproot/STATIC/auto-reboot-service_reboot
+    rm -f /mnt/tmproot/USERDATA/OVERLAY/etc/auto-reboot-service_reboot
+    umount_fs
+    sleep 3
+    reboot -f
+  fi
+}
+
+get_variables() {
+  [ "$ROOT_MOUNT" != "true" ] && return 0
+  if [ -f /mnt/tmproot/CONFIG/mode ]; then
+    IMGLDR_MODE="$(cat /mnt/tmproot/CONFIG/mode 2>/dev/null)"
+    if [ "$IMGLDR_MODE" != "RAMDISK" ] && [ "$IMGLDR_MODE" != "DEVELOPER" ] && [ "$IMGLDR_MODE" != "STORED" ]; then
+      pretty_text "     !!! CONFIG ERROR !!!" "   Invalid mode in config!" "   Defaulting to RAMDISK mode!"
+      sleep 3.0
+      IMGLDR_MODE="RAMDISK"
+    fi
+  fi
+  if [ -f /mnt/tmproot/CONFIG/reset ]; then
+    RESET_USERDATA="$(cat /mnt/tmproot/STATIC/reset_data 2>/dev/null)"
+    rm -f /mnt/tmproot/STATIC/reset_data >/dev/null 2>&1
+    if [ "$RESET_USERDATA" != "USER" ] && [ "$RESET_USERDATA" != "CONFIG" ] && [ "$RESET_USERDATA" != "ALL" ]; then
+      pretty_text "     !!! CONFIG ERROR !!!" "   Invalid reset in config!" "   Defaulting to USER reset!"
+      sleep 3.0
+      RESET_USERDATA="USER"
+    fi
+  fi
+  if [ -f "/mnt/tmproot/IMAGES/system.sqfs" ]; then
+    BOOT="imgldr"
+  else
+    if [ -f "/mnt/tmproot/sbin/init" ]; then
+      pretty_text "       !!! WARNING !!!" "    system.sqfs not found!" "  running local installation" "          instead..."
+      BOOT="local"
+    else
+      panic_pretty "     !!! KERNEL PANIC !!!" "    system.sqfs not found!" "local installation not found!" "     nothing to boot up!" "${ROOT_DEV}"
+    fi
+  fi
+}
+
+check_update() {
+  if [ "$ROOT_MOUNT" = "true" ] && [ "$BOOT_MOUNT" = "true"  ]; then
+    if [ -d /mnt/tmproot/IMAGES/update_tmp ]; then
+      pretty_text "        !!! INFO !!!" "   TMP SYSTEM UPDATE FOUND" "    IT WILL BE REMOVED NOW" "   REDOWNLOAD IT TO INSTALL!"
+      rm -rf /mnt/tmproot/IMAGES/update_tmp >/dev/null 2>&1
+      rm -rf /mnt/tmproot/IMAGES/update >/dev/null 2>&1
+      sleep 3.0
+      return
+    fi
+    if [ -d /mnt/tmproot/IMAGES/update ]; then
+      if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
+        pretty_text "     SYSTEM UPDATE FOUND" "  PLEASE LEAVE DEVELOPER MODE" "        TO INSTALL IT!"
+        sleep 3.0
+        return
+      fi
+      pretty_text "   INSTALLING SYSTEM UPDATE" "   PLEASE DO NOT POWER OFF!" ""
+      mkdir -p /usr/share/system_update /mnt/syssqfs
+      if [ -f /mnt/tmproot/IMAGES/update/install_update ]; then
+        cp -f /mnt/tmproot/IMAGES/update/install_update /usr/share/system_update/install_update
+      elif [ -f "/mnt/tmproot/IMAGES/update/system.sqfs" ]; then
+        if mount -t squashfs /mnt/tmproot/IMAGES/update/system.sqfs /mnt/syssqfs; then
+          SQFS_MOUNT="true"
+          if [ -f /mnt/syssqfs/INFO/install_update ]; then
+            cp -f /mnt/syssqfs/INFO/install_update /usr/share/system_update/install_update
+          fi
+        fi
+      fi
+      umount_fs
+      if [ -f /usr/share/system_update/install_update ]; then
+        local success_text="         SUCCESSFULLY"
+        chmod +x /usr/share/system_update/install_update
+        /bin/sh -c /usr/share/system_update/install_update || success_text="         WITH ERRORS!"
+        rm -rf /mnt/tmproot/IMAGES/update >/dev/null 2>&1
+        sleep 2.0
+        pretty_text "    SYSTEM UPDATE FINISHED" "$success_text" "         REBOOTING..."
+      else
+        rm -rf /mnt/tmproot/IMAGES/update >/dev/null 2>&1
+        sleep 2.0
+        pretty_text "  !!! UPDATE-PACK-ERROR !!!" "Could not get Install script!" "         REBOOTING..."
+      fi
+      umount_fs
+      sleep 4.0
+      reboot -f
+    fi
+  fi
+}
+
+remove_vanilla_scripts() {
+  [ "$BOOT" != "imgldr" ] && return 0
+  if [ -e "/scripts/init-bottom/overlayroot" ]; then
+    echo "#!/bin/sh" > /scripts/init-bottom/overlayroot
+    echo "exit 0" >> /scripts/init-bottom/overlayroot
+    chmod +x /scripts/init-bottom/overlayroot
+  fi
+  if [ -e "/scripts/local-premount/firstboot" ]; then
+    echo "#!/bin/sh" > /scripts/local-premount/firstboot
+    echo "exit 0" >> /scripts/local-premount/firstboot
+    chmod +x /scripts/local-premount/firstboot
+  fi
+  if [ -e "/scripts/local-premount/resize_early" ]; then
+    echo "#!/bin/sh" > /scripts/local-premount/resize_early
+    echo "exit 0" >> /scripts/local-premount/resize_early
+    chmod +x /scripts/local-premount/resize_early
+  fi
+  if [ -e "/scripts/local-bottom/imager_fixup" ]; then
+    echo "#!/bin/sh" > /scripts/local-bottom/imager_fixup
+    echo "exit 0" >> /scripts/local-bottom/imager_fixup
+    chmod +x /scripts/local-bottom/imager_fixup
+  fi
+  if [ -e "/scripts/local-bottom/set_partuuid" ]; then
+    echo "#!/bin/sh" > /scripts/local-bottom/set_partuuid
+    echo "exit 0" >> /scripts/local-bottom/set_partuuid
+    chmod +x /scripts/local-bottom/set_partuuid
+  fi
+}
+
+export_variables() {
+  mkdir -p /conf
+  touch /conf/param.conf
+  echo "BOOT=$BOOT" >> "/conf/param.conf"
+  echo "IMGLDR_MODE=$IMGLDR_MODE" >> "/conf/param.conf"
+  echo "RESET_USERDATA=$RESET_USERDATA" >> "/conf/param.conf"
+  echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/param.conf"
+}
+
+get_cmdline
+get_devices
+mount_fs
+auto_reboot_addon
+get_variables
+check_update
+umount_fs
+remove_vanilla_scripts
+export_variables
+
+exit 0

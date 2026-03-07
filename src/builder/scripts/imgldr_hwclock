@@ -1,0 +1,19 @@
+#!/bin/sh
+PREREQ=""
+prereqs() {
+         echo "$PREREQ"
+}
+case $1 in 
+# get pre-requisites 
+prereqs)
+         prereqs
+         exit 0
+         ;; esac
+
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p ${DESTDIR}/etc/date
+echo "$(date '+%Y-%m-%d %H:%M:%S')" > ${DESTDIR}/etc/date/fake-hwclock
+chmod 644 ${DESTDIR}/etc/date/fake-hwclock
+date +%s > ${DESTDIR}/etc/date/clock
+chmod 644 ${DESTDIR}/etc/date/clock
+exit 0
