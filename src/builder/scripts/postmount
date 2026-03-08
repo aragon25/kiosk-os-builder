@@ -1,5 +1,6 @@
 #!/bin/sh
 
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
 [ -e /conf/param.conf ] && . /conf/param.conf
 
 umount_boot() {
