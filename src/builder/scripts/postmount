@@ -1,0 +1,31 @@
+#!/bin/sh
+
+[ -e /conf/param.conf ] && . /conf/param.conf
+
+umount_boot() {
+  local attempt
+  sync >/dev/null 2>&1
+  attempt=1
+  [ "$(mount -l | fgrep "${BOOT_MOUNT}" | wc -l)" = "0" ] && BOOT_MOUNT="false"
+  while [ "${BOOT_MOUNT}" != "false" ] && [ $attempt -le 30 ]; do
+    umount "${BOOT_MOUNT}" >/dev/null 2>&1 && BOOT_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
+  done
+  [ "${BOOT_MOUNT}" != "false" ] && echo "Could not umount: ${BOOT_MOUNT}"
+}
+
+change_init() {
+  local init_script="/usr/lib/imgldr/init"
+  mkdir -p /conf
+  touch /conf/param.conf
+  if [ "${FIRSTBOOT}" = "yes" ] && [ -f "${rootmnt}${init_script}" ]; then
+    echo "init=$init_script" >> "/conf/param.conf"
+  elif [ "${FIRSTBOOT}" = "yes" ]; then
+    imgldr_pretty_text "       !!! WARNING !!!" "    First boot init script" "          not found!" "   Running default init..."
+  fi
+}
+
+imgldr_check_fs
+umount_boot
+change_init
+
+exit 0
