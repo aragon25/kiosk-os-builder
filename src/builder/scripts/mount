@@ -3,62 +3,12 @@
 [ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
 [ -e /conf/param.conf ] && . /conf/param.conf
 
-repair_bootfs() {
-  local restored_boot
-  local filepath
-  local filename
-  #Restore boot partition if needed
-  if [ "$IMGLDR_MODE" != "DEVELOPER" ]; then
-    if [ -d ${SQFS_MOUNT}/BOOT ]; then
-      for filepath in ${SQFS_MOUNT}/BOOT/*; do
-        filename=$(basename "${filepath}")
-        if [ -f "${filepath}" ] && ! diff "${filepath}" "${BOOT_MOUNT}/${filename}" >/dev/null 2>&1; then
-          [ -z "${restored_boot}" ] && imgldr_pretty_text "Restore boot partition data..." "      Then Rebooting..." "" && echo " "
-          cp -f "${filepath}" "${BOOT_MOUNT}/${filename}"
-          restored_boot="yes"
-        fi
-      done
-      for filepath in ${SQFS_MOUNT}/BOOT/overlays/*; do
-        filename=$(basename "${filepath}")
-        if [ -f "${filepath}" ] && ! diff "${filepath}" "${BOOT_MOUNT}/overlays/${filename}" >/dev/null 2>&1; then
-          [ -z "${restored_boot}" ] && imgldr_pretty_text "Restore boot partition data..." "      Then Rebooting..." "" && echo " "
-          cp -f "${filepath}" "${BOOT_MOUNT}/overlays/${filename}"
-          restored_boot="yes"
-        fi
-      done
-      [ -n "${restored_boot}" ] && imgldr_do_reboot
-    else
-      imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "    BOOT folder not found!" "   boot partition might be" "          outdated..." "${BOOT_DEV}"
-    fi
-  fi
-}
-
-build_dirs() {
-  # Create directories for overlay mountpoints
-  mkdir -p /mnt/overlay/developer /mnt/overlay/etc /mnt/overlay/home /mnt/overlay/var
-  # Build rootfs base directory structure
-  mkdir -p ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES ${ROOT_MOUNT}/USERDATA ${ROOT_MOUNT}/STATIC
-  mkdir -p ${ROOT_MOUNT}/USERDATA/PERSIST_RAM ${ROOT_MOUNT}/USERDATA/OVERLAY ${ROOT_MOUNT}/USERDATA/DEVELOPER
-  chown -fR 0:0 ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES ${ROOT_MOUNT}/STATIC
-  chmod -fR u=rwX,g=rX,o=rX ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES
-  chmod -fR u=rwX,g=X,o=X ${ROOT_MOUNT}/STATIC
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA
-  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/PERSIST_RAM
-  chmod -f u=rwX,g=rwX,o=rX ${ROOT_MOUNT}/USERDATA/PERSIST_RAM
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/OVERLAY
-  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA/OVERLAY
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/DEVELOPER
-  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA/DEVELOPER
-}
-
 mount_root_fs()
 {
   local attempt
   local filepath
   local filename
   local response
-
 
   # Mount the overlay in /mnt/overlay
   if [ -z "${DEVMODE}" ] || [ -n "${FIRSTBOOT}" ]; then

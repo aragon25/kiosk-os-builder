@@ -1,0 +1,141 @@
+#!/bin/sh
+
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
+[ -e /conf/param.conf ] && . /conf/param.conf
+
+IMGLDR_MODE="NORMAL"
+IMGLDR_RESET="NONE"
+FIRSTBOOT="NO"
+
+get_variables() {
+  if [ -f "${ROOT_MOUNT}/CONFIG/mode" ]; then
+    IMGLDR_MODE="$(cat "${ROOT_MOUNT}/CONFIG/mode" 2>/dev/null)"
+    if [ "$IMGLDR_MODE" != "RAMDISK" ] && [ "$IMGLDR_MODE" != "DEVELOPER" ] && [ "$IMGLDR_MODE" != "STORED" ]; then
+      imgldr_pretty_text "     !!! CONFIG ERROR !!!" "   Invalid mode in config!" "   Defaulting to RAMDISK mode!"
+      sleep 3.0
+      IMGLDR_MODE="RAMDISK"
+    fi
+  fi
+  if [ -f "${ROOT_MOUNT}/CONFIG/reset" ]; then
+    IMGLDR_RESET="$(cat "${ROOT_MOUNT}/CONFIG/reset" 2>/dev/null)"
+    if [ "$IMGLDR_RESET" != "USER" ] && [ "$IMGLDR_RESET" != "CONFIG" ] && 
+       [ "$IMGLDR_RESET" != "ALL" ] && [ "$IMGLDR_RESET" != "NONE" ]; then
+      imgldr_pretty_text "     !!! CONFIG ERROR !!!" "   Invalid reset in config!" "   Ignoring USER reset!"
+      sleep 3.0
+      IMGLDR_RESET="NONE"
+    fi
+  fi
+  for x in $(cat /proc/cmdline)
+  do
+    case $x in
+      FIRSTBOOT|*firstboot*|resize)
+        FIRSTBOOT="YES"
+      ;;
+    esac
+  done
+}
+
+repair_bootfs() {
+  local restored_boot
+  local filepath
+  local filename
+  if [ "$IMGLDR_MODE" != "DEVELOPER" ]; then
+    if [ -d ${SQFS_MOUNT}/BOOT ]; then
+      for filepath in ${SQFS_MOUNT}/BOOT/*; do
+        filename=$(basename "${filepath}")
+        if [ -f "${filepath}" ] && ! diff "${filepath}" "${BOOT_MOUNT}/${filename}" >/dev/null 2>&1; then
+          [ -z "${restored_boot}" ] && imgldr_pretty_text "Restore boot partition data..." "      Then Rebooting..."
+          cp -f "${filepath}" "${BOOT_MOUNT}/${filename}"
+          restored_boot="yes"
+        fi
+      done
+      for filepath in ${SQFS_MOUNT}/BOOT/overlays/*; do
+        filename=$(basename "${filepath}")
+        if [ -f "${filepath}" ] && ! diff "${filepath}" "${BOOT_MOUNT}/overlays/${filename}" >/dev/null 2>&1; then
+          [ -z "${restored_boot}" ] && imgldr_pretty_text "Restore boot partition data..." "      Then Rebooting..."
+          cp -f "${filepath}" "${BOOT_MOUNT}/overlays/${filename}"
+          restored_boot="yes"
+        fi
+      done
+      [ -n "${restored_boot}" ] && imgldr_do_reboot
+    else
+      imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "    BOOT folder not found!" "   boot partition might be" "          outdated..."
+    fi
+  fi
+}
+
+build_dirs() {
+  # Create directories for overlay mountpoints
+  mkdir -p /mnt/overlay/developer /mnt/overlay/etc /mnt/overlay/home /mnt/overlay/var
+  # Build rootfs base directory structure
+  mkdir -p ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES ${ROOT_MOUNT}/USERDATA ${ROOT_MOUNT}/STATIC
+  mkdir -p ${ROOT_MOUNT}/USERDATA/PERSIST_RAM ${ROOT_MOUNT}/USERDATA/OVERLAY ${ROOT_MOUNT}/USERDATA/DEVELOPER
+  chown -fR 0:0 ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES ${ROOT_MOUNT}/STATIC
+  chmod -fR u=rwX,g=rX,o=rX ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES
+  chmod -fR u=rwX,g=X,o=X ${ROOT_MOUNT}/STATIC
+  chown -f 0:0 ${ROOT_MOUNT}/USERDATA
+  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA
+  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/PERSIST_RAM
+  chmod -f u=rwX,g=rwX,o=rX ${ROOT_MOUNT}/USERDATA/PERSIST_RAM
+  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/OVERLAY
+  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA/OVERLAY
+  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/DEVELOPER
+  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA/DEVELOPER
+}
+
+remove_vanilla_scripts() {
+  if [ -e "/scripts/init-bottom/overlayroot" ]; then
+    echo "#!/bin/sh" > /scripts/init-bottom/overlayroot
+    echo "exit 0" >> /scripts/init-bottom/overlayroot
+    chmod +x /scripts/init-bottom/overlayroot
+  fi
+  if [ -e "/scripts/local-premount/firstboot" ]; then
+    echo "#!/bin/sh" > /scripts/local-premount/firstboot
+    echo "exit 0" >> /scripts/local-premount/firstboot
+    chmod +x /scripts/local-premount/firstboot
+  fi
+  if [ -e "/scripts/local-premount/resize_early" ]; then
+    echo "#!/bin/sh" > /scripts/local-premount/resize_early
+    echo "exit 0" >> /scripts/local-premount/resize_early
+    chmod +x /scripts/local-premount/resize_early
+  fi
+  if [ -e "/scripts/local-bottom/imager_fixup" ]; then
+    echo "#!/bin/sh" > /scripts/local-bottom/imager_fixup
+    echo "exit 0" >> /scripts/local-bottom/imager_fixup
+    chmod +x /scripts/local-bottom/imager_fixup
+  fi
+  if [ -e "/scripts/local-bottom/set_partuuid" ]; then
+    echo "#!/bin/sh" > /scripts/local-bottom/set_partuuid
+    echo "exit 0" >> /scripts/local-bottom/set_partuuid
+    chmod +x /scripts/local-bottom/set_partuuid
+  fi
+}
+
+auto_reboot_addon() {
+  local static_reboot="${ROOT_MOUNT}/STATIC/auto-reboot-service_reboot"
+  local overlay_reboot="${ROOT_MOUNT}/USERDATA/OVERLAY/etc/auto-reboot-service_reboot"
+  if [ -f "${static_reboot}" ] || [ -f "${overlay_reboot}" ]; then
+    imgldr_pretty_text "     !!! INFORMATION !!!" "    Unrecognized shutdown" "          appeared!" "    Rebooting once now..."
+    rm -f "${static_reboot}"
+    rm -f "${overlay_reboot}"
+    imgldr_do_reboot
+  fi
+}
+
+export_variables() {
+  mkdir -p /conf
+  touch /conf/param.conf
+  echo "IMGLDR_MODE=$IMGLDR_MODE" >> "/conf/param.conf"
+  echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/param.conf"
+}
+
+imgldr_check_fs
+get_variables
+repair_bootfs
+build_dirs
+[ -f /lib/imgldr/update ] && . /lib/imgldr/update && update_start
+remove_vanilla_scripts
+auto_reboot_addon
+export_variables
+
+exit 0
