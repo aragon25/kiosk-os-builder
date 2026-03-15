@@ -1,7 +1,6 @@
 #!/bin/sh
 
 [ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
-[ -e /conf/param.conf ] && . /conf/param.conf
 
 umount_boot() {
   local attempt
@@ -25,7 +24,6 @@ change_init() {
   fi
 }
 
-imgldr_check_fs
 umount_boot
 change_init
 

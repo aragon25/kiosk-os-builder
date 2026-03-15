@@ -1,9 +1,8 @@
 #!/bin/sh
 
 [ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
-[ -e /conf/param.conf ] && . /conf/param.conf
 
-IMGLDR_MODE="NORMAL"
+IMGLDR_MODE="RAMDISK"
 IMGLDR_RESET="NONE"
 FIRSTBOOT="NO"
 
@@ -33,6 +32,11 @@ get_variables() {
       ;;
     esac
   done
+  mkdir -p /conf
+  touch /conf/param.conf
+  echo "IMGLDR_MODE=$IMGLDR_MODE" >> "/conf/param.conf"
+  echo "IMGLDR_RESET=$IMGLDR_RESET" >> "/conf/param.conf"
+  echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/param.conf"
 }
 
 repair_bootfs() {
@@ -122,13 +126,6 @@ auto_reboot_addon() {
   fi
 }
 
-export_variables() {
-  mkdir -p /conf
-  touch /conf/param.conf
-  echo "IMGLDR_MODE=$IMGLDR_MODE" >> "/conf/param.conf"
-  echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/param.conf"
-}
-
 imgldr_check_fs
 get_variables
 repair_bootfs
@@ -136,6 +133,5 @@ build_dirs
 [ -f /lib/imgldr/update ] && . /lib/imgldr/update && update_start
 remove_vanilla_scripts
 auto_reboot_addon
-export_variables
 
 exit 0
