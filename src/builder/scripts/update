@@ -1,6 +1,4 @@
-#!/bin/sh
-
-UPDATE_SQFS_MOUNT="false"
+UPD_SQFS_MOUNT="false"
 
 update_cancel() {
   imgldr_pretty_text "     !!! UPDATE-ERROR !!!" "   An error occurred during" "     system update process!" "   Update files will be removed!"
@@ -9,34 +7,29 @@ update_cancel() {
 }
 
 update_umount() {
+  imgldr_umount_sqfs || return 1
   local result=0
   local attempt
   sync >/dev/null 2>&1
-  [ "$(mount | fgrep "${UPDATE_SQFS_MOUNT}" 2>/dev/null | wc -l)" = "0" ] && UPDATE_SQFS_MOUNT="false"
-  [ "$(mount | fgrep "${SQFS_MOUNT}" 2>/dev/null | wc -l)" = "0" ] && SQFS_MOUNT="false"
+  [ "$(mount | fgrep "${UPD_SQFS_MOUNT}" 2>/dev/null | wc -l)" = "0" ] && UPD_SQFS_MOUNT="false"
   attempt=1
-  while [ "${UPDATE_SQFS_MOUNT}" != "false" ] && [ $attempt -le 30 ]; do
-    umount "${UPDATE_SQFS_MOUNT}" >/dev/null 2>&1 && UPDATE_SQFS_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
+  while [ "${UPD_SQFS_MOUNT}" != "false" ] && [ $attempt -le 30 ]; do
+    umount "${UPD_SQFS_MOUNT}" >/dev/null 2>&1 && UPD_SQFS_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
   done
-  attempt=1
-  while [ "${SQFS_MOUNT}" != "false" ] && [ $attempt -le 30 ]; do
-    umount "${SQFS_MOUNT}" >/dev/null 2>&1 && SQFS_MOUNT="false" || { sleep 1; attempt=$((attempt + 1)); }
-  done
-  [ "${UPDATE_SQFS_MOUNT}" != "false" ] && echo "Could not umount: ${UPDATE_SQFS_MOUNT}" && result=1
-  [ "${SQFS_MOUNT}" != "false" ] && echo "Could not umount: ${SQFS_MOUNT}" && result=1
+  [ "${UPD_SQFS_MOUNT}" != "false" ] && echo "Could not umount: ${UPD_SQFS_MOUNT}" && result=1
   return $result
 }
 
 update_start() {
-  if [ -d "${ROOT_MOUNT}/IMAGES/update" ]; then
+  if [ -d "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update" ]; then
     if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
       imgldr_pretty_text "     SYSTEM UPDATE FOUND" "  PLEASE LEAVE DEVELOPER MODE" "        TO INSTALL IT!"
       sleep 3.0
       return
     fi
     imgldr_pretty_text "   INSTALLING SYSTEM UPDATE" "   PLEASE DO NOT POWER OFF!"
-    cp -f /lib/imgldr/update "${ROOT_MOUNT}/IMAGES/update_tmp" >/dev/null 2>&1
-    local realpath_update="$(readlink -f "${ROOT_MOUNT}/IMAGES/update/system.sqfs")"
+    cp -f /lib/imgldr/update "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
+    local realpath_update="$(readlink -f "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs")"
     local realpath_installed="$(readlink -f "${ROOT_MOUNT}/IMAGES/system.sqfs")"
     local installed_branch="unknown"
     local installed_version="unknown"
@@ -44,17 +37,17 @@ update_start() {
     local update_version="unknown"
     if [ -f "${realpath_update}" ]; then
       echo "Mounting update system.sqfs..."
-      mkdir -p /mnt/tmpsqfs
-      if mount -t squashfs "${realpath_update}" "/mnt/tmpsqfs"; then
-        UPDATE_SQFS_MOUNT="/mnt/tmpsqfs"
+      mkdir -p /mnt/upd_sqfs
+      if mount -t squashfs "${realpath_update}" "/mnt/upd_sqfs"; then
+        UPD_SQFS_MOUNT="/mnt/upd_sqfs"
       else
         echo "ERROR: Could not mount new system.sqfs from update package!"
         update_cancel
         return
       fi
       echo "Checking update package integrity..."
-      if [ ! -d "${UPDATE_SQFS_MOUNT}/BOOT" ] || [ ! -f "${UPDATE_SQFS_MOUNT}/INFO/systeminfo" ] ||
-         [ ! -f "${UPDATE_SQFS_MOUNT}/INFO/scripts.tar" ] ||[ ! -d "${UPDATE_SQFS_MOUNT}/SYSTEM/sbin/init" ]; then
+      if [ ! -d "${UPD_SQFS_MOUNT}/BOOT" ] || [ ! -f "${UPD_SQFS_MOUNT}/INFO/systeminfo" ] ||
+         [ ! -f "${UPD_SQFS_MOUNT}/INFO/scripts.tar" ] ||[ ! -d "${UPD_SQFS_MOUNT}/SYSTEM/sbin/init" ]; then
         echo "ERROR: Invalid update file (some files are missing)..."
         update_cancel
         return
@@ -67,8 +60,8 @@ update_start() {
       installed_version="$(cat "${SQFS_MOUNT}/INFO/systeminfo" 2>/dev/null | grep  "VERSION=" | cut -d= -f2)"
       [ "$installed_branch" = "" ] && installed_branch="unknown"
       [ "$installed_version" = "" ] && installed_version="unknown"
-      update_branch="$(cat "${UPDATE_SQFS_MOUNT}/INFO/systeminfo" 2>/dev/null | grep "BRANCH=" | cut -d= -f2)"
-      update_version="$(cat "${UPDATE_SQFS_MOUNT}/INFO/systeminfo" 2>/dev/null | grep  "VERSION=" | cut -d= -f2)"
+      update_branch="$(cat "${UPD_SQFS_MOUNT}/INFO/systeminfo" 2>/dev/null | grep "BRANCH=" | cut -d= -f2)"
+      update_version="$(cat "${UPD_SQFS_MOUNT}/INFO/systeminfo" 2>/dev/null | grep  "VERSION=" | cut -d= -f2)"
       [ "$update_branch" = "" ] && update_branch="unknown"
       [ "$update_version" = "" ] && update_version="unknown"
       if [ "$update_branch" = "unknown" ] || [ "$update_version" = "unknown" ]; then
@@ -91,24 +84,23 @@ update_start() {
       fi
       if [ -f "${realpath_installed}" ]; then
         echo "Backing up current system.sqfs..."
-        mv -f "${realpath_installed}" "${ROOT_MOUNT}/STATIC/system.sqfs.bak" >/dev/null 2>&1
+        mv -f "${realpath_installed}" "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" >/dev/null 2>&1
         sleep 2.0
       fi
       echo "Installing new system.sqfs from update package..."
       mv -f "${realpath_update}" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
       sleep 2.0
       echo "Verifying new system.sqfs installation..."
-      if mount -t squashfs "${ROOT_MOUNT}/IMAGES/system.sqfs" "/mnt/syssqfs" >/dev/null 2>&1; then
-        SQFS_MOUNT="/mnt/syssqfs"
+      if mount -t squashfs "${ROOT_MOUNT}/IMAGES/system.sqfs" "/mnt/upd_sqfs" >/dev/null 2>&1; then
+        UPD_SQFS_MOUNT="/mnt/upd_sqfs"
       else
         echo "ERROR: Could not mount new system.sqfs after installation!"
         update_cancel
         return
       fi
       update_umount >/dev/null 2>&1
-      rm -rf "${ROOT_MOUNT}/IMAGES/update" >/dev/null 2>&1
-      rm -f "${ROOT_MOUNT}/IMAGES/update_tmp" >/dev/null 2>&1
-      rm -f "${ROOT_MOUNT}/STATIC/system.sqfs.bak" >/dev/null 2>&1
+      rm -rf "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update" >/dev/null 2>&1
+      rm -f "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
       imgldr_pretty_text "    SYSTEM UPDATE FINISHED" "    booting new system..."
       imgldr_do_reboot
     else
@@ -120,25 +112,24 @@ update_start() {
 }
 
 update_check_fail() {
-  if [ -f "${ROOT_MOUNT}/IMAGES/update_tmp" ]; then
+  if [ -f "${ROOT_MOUNT}/CONFIG/update_tmp" ]; then
     echo "An error occurred during the last update process."
     echo "Update files will be removed and backup will be restored."
     echo "Please redownload the update package to try again."
-    if [ -f "${ROOT_MOUNT}/STATIC/system.sqfs.bak" ]; then
+    if [ -f "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" ]; then
       echo "Restoring backup system.sqfs..."
-      imgldr_umount_sqfs
-      if mount -t squashfs "${ROOT_MOUNT}/STATIC/system.sqfs.bak" "/mnt/syssqfs" >/dev/null 2>&1; then
-        SQFS_MOUNT="/mnt/syssqfs"
+      if mount -t squashfs "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" "/mnt/upd_sqfs" >/dev/null 2>&1; then
+        UPD_SQFS_MOUNT="/mnt/upd_sqfs"
       else
         imgldr_panic_pretty "     !!! KERNEL PANIC !!!" " Failed to mount backup system.sqfs." " Corrupted backup system.sqfs image!" "   Cannot continue booting!"
       fi
-      imgldr_umount_sqfs
-      mv -f "${ROOT_MOUNT}/STATIC/system.sqfs.bak" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
+      update_umount >/dev/null 2>&1
+      rm -f "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
+      mv -f "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
     fi
     echo "Remove files now..."
-    rm -rf "${ROOT_MOUNT}/IMAGES/update" >/dev/null 2>&1
-    rm -f "${ROOT_MOUNT}/IMAGES/update_tmp" >/dev/null 2>&1
-    rm -f "${ROOT_MOUNT}/STATIC/system.sqfs.bak" >/dev/null 2>&1
+    rm -rf "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update" >/dev/null 2>&1
+    rm -f "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
     imgldr_do_reboot
   fi
 }

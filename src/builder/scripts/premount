@@ -1,9 +1,10 @@
 #!/bin/sh
 
-[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
 
 IMGLDR_MODE="RAMDISK"
 IMGLDR_RESET="NONE"
+SYS_MOUNT="/mnt/sys_final"
 FIRSTBOOT="NO"
 
 get_variables() {
@@ -37,6 +38,7 @@ get_variables() {
   echo "IMGLDR_MODE=$IMGLDR_MODE" >> "/conf/param.conf"
   echo "IMGLDR_RESET=$IMGLDR_RESET" >> "/conf/param.conf"
   echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/param.conf"
+  echo "SYS_MOUNT=$SYS_MOUNT" >> "/conf/param.conf"
 }
 
 repair_bootfs() {
@@ -69,60 +71,100 @@ repair_bootfs() {
 }
 
 build_dirs() {
-  # Create directories for overlay mountpoints
-  mkdir -p /mnt/overlay/developer /mnt/overlay/etc /mnt/overlay/home /mnt/overlay/var
   # Build rootfs base directory structure
-  mkdir -p ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES ${ROOT_MOUNT}/USERDATA ${ROOT_MOUNT}/STATIC
-  mkdir -p ${ROOT_MOUNT}/USERDATA/PERSIST_RAM ${ROOT_MOUNT}/USERDATA/OVERLAY ${ROOT_MOUNT}/USERDATA/DEVELOPER
-  chown -fR 0:0 ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES ${ROOT_MOUNT}/STATIC
-  chmod -fR u=rwX,g=rX,o=rX ${ROOT_MOUNT}/CONFIG ${ROOT_MOUNT}/IMAGES
-  chmod -fR u=rwX,g=X,o=X ${ROOT_MOUNT}/STATIC
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA
-  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/PERSIST_RAM
-  chmod -f u=rwX,g=rwX,o=rX ${ROOT_MOUNT}/USERDATA/PERSIST_RAM
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/OVERLAY
-  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA/OVERLAY
-  chown -f 0:0 ${ROOT_MOUNT}/USERDATA/DEVELOPER
-  chmod -f u=rwX,g=rX,o=rX ${ROOT_MOUNT}/USERDATA/DEVELOPER
+  mkdir -p "${ROOT_MOUNT}/CONFIG" "${ROOT_MOUNT}/IMAGES" "${ROOT_MOUNT}/USERDATA" "${ROOT_MOUNT}/RAMSTORAGE"
+  mkdir -p "${ROOT_MOUNT}/USERDATA/data" "${ROOT_MOUNT}/USERDATA/work"
+  mkdir -p "${ROOT_MOUNT}/RAMSTORAGE/var" "${ROOT_MOUNT}/RAMSTORAGE/daemon" "${ROOT_MOUNT}/RAMSTORAGE/home"
+  chown -fR 0:0 "${ROOT_MOUNT}/CONFIG" "${ROOT_MOUNT}/IMAGES"
+  chmod -fR u=rwX,g=rX,o=rX "${ROOT_MOUNT}/CONFIG" "${ROOT_MOUNT}/IMAGES"
+  chown -f 0:0 "${ROOT_MOUNT}/USERDATA" "${ROOT_MOUNT}/USERDATA/data" "${ROOT_MOUNT}/USERDATA/work"
+  chmod -f u=rwX,g=rX,o=rX "${ROOT_MOUNT}/USERDATA" "${ROOT_MOUNT}/USERDATA/data" "${ROOT_MOUNT}/USERDATA/work"
+  chown -f 0:0 "${ROOT_MOUNT}/RAMSTORAGE" "${ROOT_MOUNT}/RAMSTORAGE/var" "${ROOT_MOUNT}/RAMSTORAGE/daemon" "${ROOT_MOUNT}/RAMSTORAGE/home"
+  chmod -f u=rwX,g=rwX,o=rX "${ROOT_MOUNT}/RAMSTORAGE" "${ROOT_MOUNT}/RAMSTORAGE/var" "${ROOT_MOUNT}/RAMSTORAGE/daemon" "${ROOT_MOUNT}/RAMSTORAGE/home"
+  if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
+    imgldr_pretty_text "       !!! WARNING !!!" "  YOU ARE IN DEVELOPER MODE!" "  Changes here will be saved" " separated from other modes!"  "And removed after leaving it!"
+    mkdir -p "${ROOT_MOUNT}/DEVELOPER"
+    chown -f 0:0 "${ROOT_MOUNT}/DEVELOPER"
+    chmod -f u=rwX,g=rX,o=rX "${ROOT_MOUNT}/DEVELOPER"
+  elif [ -d "${ROOT_MOUNT}/DEVELOPER" ]; then
+    imgldr_pretty_text "       !!! WARNING !!!" "   LEAVING DEVELOPER MODE!" "   Developer folder and its" "contents will be removed now!"
+    rm -rf "${ROOT_MOUNT}/DEVELOPER"
+  fi
 }
 
-remove_vanilla_scripts() {
-  if [ -e "/scripts/init-bottom/overlayroot" ]; then
-    echo "#!/bin/sh" > /scripts/init-bottom/overlayroot
-    echo "exit 0" >> /scripts/init-bottom/overlayroot
-    chmod +x /scripts/init-bottom/overlayroot
+doing_reset() {
+  if [ "$IMGLDR_RESET" != "NONE" ]; then
+    local reset_type="userdata"
+    [ "$IMGLDR_RESET" = "CONFIG" ] && reset_type="config"
+    [ "$IMGLDR_RESET" = "ALL" ] && reset_type="factory"
+    imgldr_pretty_text "     !!! SYSTEM RESET !!!" "   $reset_type reset..." "   Please wait and do not" "         power off!"
+    if [ "$IMGLDR_RESET" = "USER" ]; then 
+      rm -rf "${ROOT_MOUNT}/USERDATA/"*
+      rm -rf "${ROOT_MOUNT}/RAMSTORAGE/"*
+    fi
+    [ "$IMGLDR_RESET" = "CONFIG" ] && rm -rf "${ROOT_MOUNT}/CONFIG/"*
+    if [ "$IMGLDR_RESET" = "ALL" ]; then 
+      rm -rf "${ROOT_MOUNT}/USERDATA/"*
+      rm -rf "${ROOT_MOUNT}/RAMSTORAGE/"*
+      rm -rf "${ROOT_MOUNT}/CONFIG/"*
+    fi
+    rm -f "${ROOT_MOUNT}/CONFIG/reset" >/dev/null 2>&1
+    echo "NONE" > "${ROOT_MOUNT}/CONFIG/reset"
+    echo "Reset Finished..."
+    imgldr_do_reboot
   fi
-  if [ -e "/scripts/local-premount/firstboot" ]; then
-    echo "#!/bin/sh" > /scripts/local-premount/firstboot
-    echo "exit 0" >> /scripts/local-premount/firstboot
-    chmod +x /scripts/local-premount/firstboot
-  fi
-  if [ -e "/scripts/local-premount/resize_early" ]; then
-    echo "#!/bin/sh" > /scripts/local-premount/resize_early
-    echo "exit 0" >> /scripts/local-premount/resize_early
-    chmod +x /scripts/local-premount/resize_early
-  fi
-  if [ -e "/scripts/local-bottom/imager_fixup" ]; then
-    echo "#!/bin/sh" > /scripts/local-bottom/imager_fixup
-    echo "exit 0" >> /scripts/local-bottom/imager_fixup
-    chmod +x /scripts/local-bottom/imager_fixup
-  fi
-  if [ -e "/scripts/local-bottom/set_partuuid" ]; then
-    echo "#!/bin/sh" > /scripts/local-bottom/set_partuuid
-    echo "exit 0" >> /scripts/local-bottom/set_partuuid
-    chmod +x /scripts/local-bottom/set_partuuid
+  if [ "$IMGLDR_MODE" != "DEVELOPER" ] && [ -d "${ROOT_MOUNT}/DEVELOPER" ]; then
+    imgldr_pretty_text "       !!! WARNING !!!" "   LEAVING DEVELOPER MODE!" "   Developer folder and its" "contents will be removed now!"
+    rm -rf "${ROOT_MOUNT}/DEVELOPER"
   fi
 }
 
 auto_reboot_addon() {
-  local static_reboot="${ROOT_MOUNT}/STATIC/auto-reboot-service_reboot"
-  local overlay_reboot="${ROOT_MOUNT}/USERDATA/OVERLAY/etc/auto-reboot-service_reboot"
-  if [ -f "${static_reboot}" ] || [ -f "${overlay_reboot}" ]; then
+  local ramstorage_reboot="${ROOT_MOUNT}/RAMSTORAGE/daemon/auto-reboot-service_reboot"
+  local userdata_reboot="${ROOT_MOUNT}/USERDATA/data/etc/auto-reboot-service_reboot"
+  if [ -f "${ramstorage_reboot}" ] || ( [ -f "${userdata_reboot}" ] && [ "$IMGLDR_MODE" = "STORED" ] ); then
     imgldr_pretty_text "     !!! INFORMATION !!!" "    Unrecognized shutdown" "          appeared!" "    Rebooting once now..."
-    rm -f "${static_reboot}"
-    rm -f "${overlay_reboot}"
+    rm -f "${ramstorage_reboot}"
+    rm -f "${userdata_reboot}"
     imgldr_do_reboot
+  fi
+}
+
+build_sys_mount() {
+  # generate SYS_MOUNT as read-write to do necessary modifications
+  local sys_overlay="/mnt/sys_overlay"
+  mkdir -p "$sys_overlay"
+  mount -t tmpfs tmpfs "$sys_overlay"
+  mkdir -p "$sys_overlay/data" mkdir -p "$sys_overlay/work"
+  local lowerdir="${SQFS_MOUNT}/SYSTEM"
+  local upperdir="${sys_overlay}/data"
+  local workdir="${sys_overlay}/work"
+  mkdir -p "${upperdir}" "${workdir}"
+  mkdir -p "$SYS_MOUNT"
+  if ! mount -t overlay overlay \
+      -o lowerdir="${lowerdir}",upperdir="${upperdir}",workdir="${workdir}" "${SYS_MOUNT}"; then
+    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "   Failed to generate sqfs" "     overlay file system"
+  fi
+  # copy version info to SYS_MOUNT
+  mkdir -p ${SYS_MOUNT}/etc/imageinfo
+  [ -f ${SQFS_MOUNT}/INFO/systeminfo ] && cp -f "${SQFS_MOUNT}/INFO/systeminfo" "${SYS_MOUNT}/etc/imageinfo/sysinfo"
+  # configuring fstab in SYS_MOUNT
+  mkdir -p ${SYS_MOUNT}/mnt/rootfs
+  local fstab_boot=$(cat ${SYS_MOUNT}/etc/fstab 2>/dev/null)
+  [ -z "$ROOT_FSTYPE" ] && ROOT_FSTYPE=$(blkid -o value -s TYPE "${ROOT_DEV}" 2>/dev/null)
+  [ -z "$ROOT_FSTYPE" ] && ROOT_FSTYPE="auto"
+  [ -z "${fstab_boot##*\/boot\/firmware*}" ] && boot_dir="/boot/firmware" || boot_dir="/boot"
+  echo "proc                   /proc           proc    defaults                      0       0" > ${SYS_MOUNT}/etc/fstab
+  echo "${BOOT_DEV}            ${boot_dir}     vfat    defaults                      0       0" >> ${SYS_MOUNT}/etc/fstab
+  echo "${ROOT_DEV}            /mnt/rootfs     ${ROOT_FSTYPE}    defaults,noatime         0       0" >> ${SYS_MOUNT}/etc/fstab
+  # make SYS_MOUNT read-only to prevent modifications to the base system
+  if ! umount "$SYS_MOUNT" >/dev/null 2>&1; then
+    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "Failed to unmount sys_overlay" "       tmpfs filesystem"
+  fi
+  local lowerdir="${sys_overlay}/data:${SQFS_MOUNT}/SYSTEM"
+  if ! mount -t overlay overlay \
+      -o lowerdir="${lowerdir}" "${SYS_MOUNT}"; then
+    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "   Failed to finalize sqfs" "     overlay file system"
   fi
 }
 
@@ -130,8 +172,9 @@ imgldr_check_fs
 get_variables
 repair_bootfs
 build_dirs
+doing_reset
 [ -f /lib/imgldr/update ] && . /lib/imgldr/update && update_start
-remove_vanilla_scripts
 auto_reboot_addon
+build_sys_mount
 
 exit 0

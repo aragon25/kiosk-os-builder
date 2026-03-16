@@ -1,0 +1,35 @@
+#!/bin/sh
+
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
+
+remove_vanilla_scripts() {
+  if [ -e "/scripts/init-bottom/overlayroot" ]; then
+    echo "#!/bin/sh" > /scripts/init-bottom/overlayroot
+    echo "exit 0" >> /scripts/init-bottom/overlayroot
+    chmod +x /scripts/init-bottom/overlayroot
+  fi
+  if [ -e "/scripts/local-premount/firstboot" ]; then
+    echo "#!/bin/sh" > /scripts/local-premount/firstboot
+    echo "exit 0" >> /scripts/local-premount/firstboot
+    chmod +x /scripts/local-premount/firstboot
+  fi
+  if [ -e "/scripts/local-premount/resize_early" ]; then
+    echo "#!/bin/sh" > /scripts/local-premount/resize_early
+    echo "exit 0" >> /scripts/local-premount/resize_early
+    chmod +x /scripts/local-premount/resize_early
+  fi
+  if [ -e "/scripts/local-bottom/imager_fixup" ]; then
+    echo "#!/bin/sh" > /scripts/local-bottom/imager_fixup
+    echo "exit 0" >> /scripts/local-bottom/imager_fixup
+    chmod +x /scripts/local-bottom/imager_fixup
+  fi
+  if [ -e "/scripts/local-bottom/set_partuuid" ]; then
+    echo "#!/bin/sh" > /scripts/local-bottom/set_partuuid
+    echo "exit 0" >> /scripts/local-bottom/set_partuuid
+    chmod +x /scripts/local-bottom/set_partuuid
+  fi
+}
+
+remove_vanilla_scripts
+
+exit 0

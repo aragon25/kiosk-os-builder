@@ -1,6 +1,6 @@
 #!/bin/sh
 
-[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
 
 mount_root_fs()
 {
@@ -13,35 +13,37 @@ mount_root_fs()
     imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "   Failed to load overlayfs" "        kernel module"
   fi
 
+  # Check sysoverlay status
+  if [ -z "${SYS_MOUNT}" ] || [ ! -d "${SYS_MOUNT}" ]; then
+    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount sys_overlay" "       tmpfs filesystem"
+  fi
+
   # Mount the final root filesystem overlay at ${rootmnt} and handle different modes
-  mkdir -p /kiosk_overlay
-  if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
-    imgldr_pretty_text "       !!! WARNING !!!" "  YOU ARE IN DEVELOPER MODE!" "  Changes here will be saved" " separated from other modes!" 
-    lowerdir="/kiosk_overlay/:${SQFS_MOUNT}/SYSTEM"
-    upperdir="${ROOT_MOUNT}/USERDATA/DEVELOPER/data"
-    workdir="${ROOT_MOUNT}/USERDATA/DEVELOPER/work"
+  if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then 
+    lowerdir="${SYS_MOUNT}"
+    upperdir="${ROOT_MOUNT}/DEVELOPER/data"
+    workdir="${ROOT_MOUNT}/DEVELOPER/work"
     mkdir -p "${upperdir}" "${workdir}"
     if ! mount -t overlay overlay \
         -o lowerdir="${lowerdir}",upperdir="${upperdir}",workdir="${workdir}" "${rootmnt}"; then
       imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount overlayfs" " as root overlay file system"
     fi
-  elif [ "$IMGLDR_MODE" != "RAMDISK" ] || [ "$IMGLDR_MODE" != "STORED" ]; then
-    lowerdir="/kiosk_overlay/:${SQFS_MOUNT}/SYSTEM"
-    if ! mount -t overlay overlay \
-        -o lowerdir="${lowerdir}" "${rootmnt}"; then
+  elif [ "$IMGLDR_MODE" = "RAMDISK" ] || [ "$IMGLDR_MODE" = "STORED" ]; then
+    lowerdir="${SYS_MOUNT}"
+    if ! mount -o bind "$SYS_MOUNT" "${rootmnt}"; then
       imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount overlayfs" " as root overlay file system"
     fi
-    if [ "$IMGLDR_MODE" != "RAMDISK" ]; then
-      mkdir -p /mnt/ramstorage
-      mount -t tmpfs tmpfs "/mnt/ramstorage"
-      mkdir -p "${ROOT_MOUNT}/USERDATA/OVERLAY/data"
-      lowerdir="${ROOT_MOUNT}/USERDATA/OVERLAY/data:${rootmnt}/var"
-      upperdir="/mnt/ramstorage/data"
-      workdir="/mnt/ramstorage/work"
+    if [ "$IMGLDR_MODE" = "RAMDISK" ]; then
+      mkdir -p /mnt/sys_ramfs
+      mount -t tmpfs tmpfs "/mnt/sys_ramfs"
+      mkdir -p "${ROOT_MOUNT}/USERDATA/data"
+      lowerdir="${ROOT_MOUNT}/USERDATA/data:${rootmnt}/var"
+      upperdir="/mnt/sys_ramfs/data"
+      workdir="/mnt/sys_ramfs/work"
     else
       lowerdir="${rootmnt}/var"
-      upperdir="${ROOT_MOUNT}/USERDATA/OVERLAY/data"
-      workdir="${ROOT_MOUNT}/USERDATA/OVERLAY/work"
+      upperdir="${ROOT_MOUNT}/USERDATA/data"
+      workdir="${ROOT_MOUNT}/USERDATA/work"
     fi
     mkdir -p "${upperdir}" "${workdir}"
     if ! mount -t overlay overlay \

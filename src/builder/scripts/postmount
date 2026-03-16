@@ -1,6 +1,6 @@
 #!/bin/sh
 
-[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
 
 umount_boot() {
   local attempt
