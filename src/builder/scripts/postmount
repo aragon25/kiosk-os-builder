@@ -2,6 +2,95 @@
 
 [ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
 
+prepare_system() {
+  # copy version info to rootmnt
+  mkdir -p ${rootmnt}/etc/imageinfo
+  [ -f ${SQFS_MOUNT}/INFO/systeminfo ] && cp -f "${SQFS_MOUNT}/INFO/systeminfo" "${rootmnt}/etc/imageinfo/sysinfo"
+  
+  # configuring fstab in rootmnt
+  mkdir -p "${rootmnt}/var/imgldr/config"
+  mkdir -p "${rootmnt}/var/imgldr/ramstorage"
+  local fstab_boot=$(cat ${SQFS_MOUNT}/SYSTEM/etc/fstab 2>/dev/null)
+  [ -z "$ROOT_FSTYPE" ] && ROOT_FSTYPE=$(blkid -o value -s TYPE "${ROOT_DEV}" 2>/dev/null)
+  [ -z "$ROOT_FSTYPE" ] && ROOT_FSTYPE="auto"
+  [ -z "${fstab_boot##*\/boot\/firmware*}" ] && boot_dir="/boot/firmware" || boot_dir="/boot"
+  echo "proc                       /proc           proc    defaults                      0       0" > ${rootmnt}/etc/fstab
+  echo "${BOOT_DEV}                ${boot_dir}     vfat    defaults                      0       0" >> ${rootmnt}/etc/fstab
+  
+  # add bind mounts for config and ramstorage
+  mount -o bind "${ROOT_MOUNT}/CONFIG" "${rootmnt}/var/imgldr/config"
+  mount -o bind "${ROOT_MOUNT}/RAMSTORAGE" "${rootmnt}/var/imgldr/ramstorage"
+
+  # create user links for ramstorage in rootmnt
+  if [ -f "${rootmnt}/etc/pam.d/common-session" ] && ! grep -q "/usr/local/bin/create-user-link" "${rootmnt}/etc/pam.d/common-session"; then
+    echo "session optional pam_exec.so /usr/local/bin/create-user-link" >> "${rootmnt}/etc/pam.d/common-session"
+  fi
+
+  # hwclock_fix
+  if [ ! -f "${ROOT_MOUNT}/RAMSTORAGE/fake-hwclock" ]; then
+    if [ -f "${rootmnt}/etc/date/fake-hwclock" ]; then 
+      cp -f "${rootmnt}/etc/date/fake-hwclock" "${ROOT_MOUNT}/RAMSTORAGE/fake-hwclock"
+    else
+      echo "2025-06-01 15:20:00" > "${ROOT_MOUNT}/RAMSTORAGE/fake-hwclock"
+    fi
+  fi
+  if [ ! -f "${ROOT_MOUNT}/RAMSTORAGE/clock" ]; then
+    if [ -f "${rootmnt}/etc/date/clock" ]; then 
+      cp -f "${rootmnt}/etc/date/clock" "${ROOT_MOUNT}/RAMSTORAGE/clock"
+    else
+      echo "1748784000" > "${ROOT_MOUNT}/RAMSTORAGE/clock" #date -d "2025-06-01 15:20:00" +%s
+    fi
+  fi
+  if [ -f "${rootmnt}/etc/fake-hwclock.data" ]; then
+    rm -f "${rootmnt}/etc/fake-hwclock.data"
+    ln -s "/var/imgldr/ramstorage/fake-hwclock" "${rootmnt}/etc/fake-hwclock.data"
+  fi
+  if [ -f "${rootmnt}/var/lib/systemd/clock" ]; then
+    rm -f "${rootmnt}/var/lib/systemd/clock"
+    ln -s "/var/imgldr/ramstorage/clock" "${rootmnt}/var/lib/systemd/clock"
+  fi
+
+  # auto-reboot_fix
+  if [ ! -f "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state" ]; then 
+    if [ -f "${rootmnt}/var/lib/auto-reboot/boot.state" ] && [ ! -L "${rootmnt}/var/lib/auto-reboot/boot.state" ]; then 
+      mv -f "${rootmnt}/var/lib/auto-reboot/boot.state" "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state"
+    else
+      echo "shutdown" > "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state"
+    fi
+  fi
+  if [ ! -L "${rootmnt}/var/lib/auto-reboot/boot.state" ]; then
+    mkdir -p "${rootmnt}/var/lib/auto-reboot"
+    ln -s "/var/imgldr/ramstorage/auto-reboot_boot.state" "${rootmnt}/var/lib/auto-reboot/boot.state"
+  fi
+  local auto_reboot="$(cat "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state" 2>/dev/null)"
+  if [ "${auto_reboot}" = "bootup" ]; then
+    imgldr_pretty_text "     !!! INFORMATION !!!" "    Unrecognized shutdown" "          appeared!" "    Rebooting once now..."
+    echo "shutdown" > "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state"
+    imgldr_do_reboot
+  fi
+
+  # activate initramfs-splash plymouth theme if configured or restore previous theme
+  current_theme=$(sed -n 's/^[[:space:]]*Theme[[:space:]]*=[[:space:]]*//p' "${rootmnt}/etc/plymouth/plymouthd.conf" 2>/dev/null | head -n1)
+  if [ "$current_theme" != "initramfs-splash" ] && [ "$current_theme" != "" ]; then
+    echo "$current_theme" > "${ROOT_MOUNT}/RAMSTORAGE/plymouth_savedtheme"
+  fi
+  saved_theme="$(awk 'NR==1 {print $1}' ${ROOT_MOUNT}/RAMSTORAGE/plymouth_savedtheme 2>/dev/null)"
+  if [ "$saved_theme" != "" ]; then
+    echo "[Daemon]" > "${rootmnt}/etc/plymouth/plymouthd.conf"
+    if [ "$saved_theme" != "" ] && [ -d "${rootmnt}/usr/share/plymouth/themes/$saved_theme" ]; then
+      echo "Theme=${saved_theme}" >> ${rootmnt}/etc/plymouth/plymouthd.conf
+    elif [ -d "${rootmnt}/usr/share/plymouth/themes/ceratopsian" ]; then
+      echo "Theme=ceratopsian" >> ${rootmnt}/etc/plymouth/plymouthd.conf
+    else
+      echo "Theme=details" >> ${rootmnt}/etc/plymouth/plymouthd.conf
+    fi
+  fi
+  if [ -f "${rootmnt}/usr/share/plymouth/themes/initramfs-splash/plymouth_forced" ]; then
+    echo "[Daemon]" > "${rootmnt}/etc/plymouth/plymouthd.conf"
+    echo "Theme=initramfs-splash" >> ${rootmnt}/etc/plymouth/plymouthd.conf
+  fi
+}
+
 umount_boot() {
   local attempt
   sync >/dev/null 2>&1
@@ -24,6 +113,7 @@ change_init() {
   fi
 }
 
+prepare_system
 umount_boot
 change_init
 

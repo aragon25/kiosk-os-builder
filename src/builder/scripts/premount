@@ -10,18 +10,22 @@ FIRSTBOOT="NO"
 get_variables() {
   if [ -f "${ROOT_MOUNT}/CONFIG/mode" ]; then
     IMGLDR_MODE="$(cat "${ROOT_MOUNT}/CONFIG/mode" 2>/dev/null)"
-    if [ "$IMGLDR_MODE" != "RAMDISK" ] && [ "$IMGLDR_MODE" != "DEVELOPER" ] && [ "$IMGLDR_MODE" != "STORED" ]; then
+    if [ "$IMGLDR_MODE" != "LOCAL" ] && [ "$IMGLDR_MODE" != "RAMDISK" ] && [ "$IMGLDR_MODE" != "DEVELOPER" ] && [ "$IMGLDR_MODE" != "STORED" ]; then
       imgldr_pretty_text "     !!! CONFIG ERROR !!!" "   Invalid mode in config!" "   Defaulting to RAMDISK mode!"
-      sleep 3.0
       IMGLDR_MODE="RAMDISK"
     fi
+    if [ "$IMGLDR_MODE" = "LOCAL" ] && [ ! -f "${ROOT_MOUNT}/sbin/init" ]; then
+      imgldr_pretty_text "       !!! WARNING !!!" "     local mode selected!" "   but no local init found!" "     switching to RAMDISK!"
+      IMGLDR_MODE="RAMDISK"
+    fi
+    [ "$IMGLDR_MODE" = "STORED" ] && imgldr_pretty_text "     !!! STORED BOOT !!!"
+    [ "$IMGLDR_MODE" = "DEVELOPER" ] && imgldr_pretty_text "    !!! DEVELOPER BOOT !!!" "  Changes here will be saved" " separated from other modes!"  "And removed after leaving it!"
   fi
   if [ -f "${ROOT_MOUNT}/CONFIG/reset" ]; then
     IMGLDR_RESET="$(cat "${ROOT_MOUNT}/CONFIG/reset" 2>/dev/null)"
     if [ "$IMGLDR_RESET" != "USER" ] && [ "$IMGLDR_RESET" != "CONFIG" ] && 
        [ "$IMGLDR_RESET" != "ALL" ] && [ "$IMGLDR_RESET" != "NONE" ]; then
       imgldr_pretty_text "     !!! CONFIG ERROR !!!" "   Invalid reset in config!" "   Ignoring USER reset!"
-      sleep 3.0
       IMGLDR_RESET="NONE"
     fi
   fi
@@ -74,15 +78,14 @@ build_dirs() {
   # Build rootfs base directory structure
   mkdir -p "${ROOT_MOUNT}/CONFIG" "${ROOT_MOUNT}/IMAGES" "${ROOT_MOUNT}/USERDATA" "${ROOT_MOUNT}/RAMSTORAGE"
   mkdir -p "${ROOT_MOUNT}/USERDATA/data" "${ROOT_MOUNT}/USERDATA/work"
-  mkdir -p "${ROOT_MOUNT}/RAMSTORAGE/var" "${ROOT_MOUNT}/RAMSTORAGE/daemon" "${ROOT_MOUNT}/RAMSTORAGE/home"
+  mkdir -p "${ROOT_MOUNT}/RAMSTORAGE"
   chown -fR 0:0 "${ROOT_MOUNT}/CONFIG" "${ROOT_MOUNT}/IMAGES"
   chmod -fR u=rwX,g=rX,o=rX "${ROOT_MOUNT}/CONFIG" "${ROOT_MOUNT}/IMAGES"
   chown -f 0:0 "${ROOT_MOUNT}/USERDATA" "${ROOT_MOUNT}/USERDATA/data" "${ROOT_MOUNT}/USERDATA/work"
   chmod -f u=rwX,g=rX,o=rX "${ROOT_MOUNT}/USERDATA" "${ROOT_MOUNT}/USERDATA/data" "${ROOT_MOUNT}/USERDATA/work"
-  chown -f 0:0 "${ROOT_MOUNT}/RAMSTORAGE" "${ROOT_MOUNT}/RAMSTORAGE/var" "${ROOT_MOUNT}/RAMSTORAGE/daemon" "${ROOT_MOUNT}/RAMSTORAGE/home"
-  chmod -f u=rwX,g=rwX,o=rX "${ROOT_MOUNT}/RAMSTORAGE" "${ROOT_MOUNT}/RAMSTORAGE/var" "${ROOT_MOUNT}/RAMSTORAGE/daemon" "${ROOT_MOUNT}/RAMSTORAGE/home"
+  chown -f 0:0 "${ROOT_MOUNT}/RAMSTORAGE" "${ROOT_MOUNT}/RAMSTORAGE"
+  chmod -f u=rwX,g=rX,o=rX "${ROOT_MOUNT}/RAMSTORAGE" "${ROOT_MOUNT}/RAMSTORAGE"
   if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
-    imgldr_pretty_text "       !!! WARNING !!!" "  YOU ARE IN DEVELOPER MODE!" "  Changes here will be saved" " separated from other modes!"  "And removed after leaving it!"
     mkdir -p "${ROOT_MOUNT}/DEVELOPER"
     chown -f 0:0 "${ROOT_MOUNT}/DEVELOPER"
     chmod -f u=rwX,g=rX,o=rX "${ROOT_MOUNT}/DEVELOPER"
@@ -120,14 +123,82 @@ doing_reset() {
 }
 
 auto_reboot_addon() {
-  local ramstorage_reboot="${ROOT_MOUNT}/RAMSTORAGE/daemon/auto-reboot-service_reboot"
-  local userdata_reboot="${ROOT_MOUNT}/USERDATA/data/etc/auto-reboot-service_reboot"
-  if [ -f "${ramstorage_reboot}" ] || ( [ -f "${userdata_reboot}" ] && [ "$IMGLDR_MODE" = "STORED" ] ); then
+  local auto_reboot="$(cat "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state" 2>/dev/null)"
+  if [ "${auto_reboot}" = "bootup" ]; then
     imgldr_pretty_text "     !!! INFORMATION !!!" "    Unrecognized shutdown" "          appeared!" "    Rebooting once now..."
-    rm -f "${ramstorage_reboot}"
-    rm -f "${userdata_reboot}"
+    echo "shutdown" > "${ROOT_MOUNT}/RAMSTORAGE/auto-reboot_boot.state"
     imgldr_do_reboot
   fi
+}
+
+initramfs_splash_addon() {
+  # add initramfs-splash plymouth theme to SYS_MOUNT if configured and available
+  local splashpth="/etc/splash"
+  local splashimg="splash.png"
+  local splashply="inactive"
+  local splashopt="center"
+  if [ -f "$splashpth/splash.config" ]; then
+    splashimg=$(sed -n 's/^[[:space:]]*imagefile[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)
+    [ -z "$splashimg" ] && splashimg="splash.png"
+    [ "$(sed -n 's/^[[:space:]]*plymouth[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)" = "1" ] && splashply="active"
+    [ "$(sed -n 's/^[[:space:]]*fullscreen[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)" = "1" ] && splashopt="fullscreen"
+    [ "$(sed -n 's/^[[:space:]]*stretch[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)" = "1" ] && splashopt="stretch"
+  else
+    return
+  fi
+  [ "$splashply" = "inactive" ] && return
+  [ ! -f "$splashpth/splash_script" ] && return
+  [ ! -f "$splashpth/splash_plymouth" ] && return
+  [ ! -f "$splashpth/$splashimg" ] && return
+  [ ! -d "${SYS_MOUNT}/usr/share/plymouth/themes" ] && return
+  [ "$IMGLDR_MODE" = "DEVELOPER" ] && imgldr_pretty_text "    Plymouth splash screen" "    from initramfs-splash" "     will not be applied" "      in developer mode!" && return
+  mkdir -p "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash" >/dev/null 2>&1
+  cp -f "$splashpth/splash_script" "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.script" >/dev/null 2>&1
+  cp -f "$splashpth/splash_plymouth" "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.plymouth" >/dev/null 2>&1
+  cp -f "$splashpth/$splashimg" "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/$splashimg" >/dev/null 2>&1
+  sed -i 's#^[[:space:]]*imagefile[[:space:]]*=.*#imagefile = "'"$splashimg"'";#' \
+    "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.script" >/dev/null 2>&1
+  sed -i 's#^[[:space:]]*mode[[:space:]]*=.*#mode = "'"$splashopt"'";#' \
+    "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.script" >/dev/null 2>&1
+  echo "[Daemon]" > "${SYS_MOUNT}/etc/plymouth/plymouthd.conf"
+  echo "Theme=initramfs-splash" >> ${SYS_MOUNT}/etc/plymouth/plymouthd.conf
+  echo "1" > "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/plymouth_forced"
+}
+
+rpi_spinner_addon() {
+  # sync plymouth-rpi-spinner with fbsplash
+  local splashpth="/etc/splash"
+  local splashimg="splash.png"
+  if [ -f "$splashpth/splash.config" ]; then
+    splashimg=$(sed -n 's/^[[:space:]]*imagefile[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)
+    [ -z "$splashimg" ] && splashimg="splash.png"
+  fi
+  [ ! -f "$splashpth/$splashimg" ] && return
+  [ ! -f "${SYS_MOUNT}/usr/share/plymouth/themes/rpi-spinner/rpi-spinner.script" ] && return
+  cp -f "$splashpth/$splashimg" "${SYS_MOUNT}/usr/share/plymouth/themes/rpi-spinner/$splashimg"
+  sed -i "s/LOGO.PNG/${splashimg}/g" "${SYS_MOUNT}/usr/share/plymouth/themes/rpi-spinner/rpi-spinner.script"
+}
+
+ramstorage_addon() {
+  #create dirs and ramstorage script
+  mkdir -p "${SYS_MOUNT}/var/imgldr/config"
+  mkdir -p "${SYS_MOUNT}/var/imgldr/ramstorage"
+  tee /usr/local/bin/create-user-link > /dev/null <<'EOF'
+#!/bin/sh
+USER_NAME="$PAM_USER"
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+TARGET="/var/imgldr/ramstorage/userhome/$USER_NAME"
+LINK="$HOME_DIR/persistent_storage"
+[ -n "$USER_NAME" ] || exit 0
+[ -n "$HOME_DIR" ] || exit 0
+[ -d "$HOME_DIR" ] || exit 0
+mkdir -p "$TARGET"
+chown -f "$USER_NAME":"$USER_NAME" "$TARGET"
+rm -fR "$LINK"
+ln -s "$TARGET" "$LINK"
+exit 0
+EOF
+  chmod +x /usr/local/bin/create-user-link
 }
 
 build_sys_mount() {
@@ -140,25 +211,17 @@ build_sys_mount() {
   local upperdir="${sys_overlay}/data"
   local workdir="${sys_overlay}/work"
   mkdir -p "${upperdir}" "${workdir}"
-  mkdir -p "$SYS_MOUNT"
+  mkdir -p "${SYS_MOUNT}"
   if ! mount -t overlay overlay \
       -o lowerdir="${lowerdir}",upperdir="${upperdir}",workdir="${workdir}" "${SYS_MOUNT}"; then
     imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "   Failed to generate sqfs" "     overlay file system"
   fi
-  # copy version info to SYS_MOUNT
-  mkdir -p ${SYS_MOUNT}/etc/imageinfo
-  [ -f ${SQFS_MOUNT}/INFO/systeminfo ] && cp -f "${SQFS_MOUNT}/INFO/systeminfo" "${SYS_MOUNT}/etc/imageinfo/sysinfo"
-  # configuring fstab in SYS_MOUNT
-  mkdir -p ${SYS_MOUNT}/mnt/rootfs
-  local fstab_boot=$(cat ${SYS_MOUNT}/etc/fstab 2>/dev/null)
-  [ -z "$ROOT_FSTYPE" ] && ROOT_FSTYPE=$(blkid -o value -s TYPE "${ROOT_DEV}" 2>/dev/null)
-  [ -z "$ROOT_FSTYPE" ] && ROOT_FSTYPE="auto"
-  [ -z "${fstab_boot##*\/boot\/firmware*}" ] && boot_dir="/boot/firmware" || boot_dir="/boot"
-  echo "proc                   /proc           proc    defaults                      0       0" > ${SYS_MOUNT}/etc/fstab
-  echo "${BOOT_DEV}            ${boot_dir}     vfat    defaults                      0       0" >> ${SYS_MOUNT}/etc/fstab
-  echo "${ROOT_DEV}            /mnt/rootfs     ${ROOT_FSTYPE}    defaults,noatime         0       0" >> ${SYS_MOUNT}/etc/fstab
+  # RUN PREPARATION STEPS ON SYS_MOUNT HERE BEFORE REMOUNTING IT AS READ-ONLY
+  rpi_spinner_addon
+  initramfs_splash_addon
+  ramstorage_addon
   # make SYS_MOUNT read-only to prevent modifications to the base system
-  if ! umount "$SYS_MOUNT" >/dev/null 2>&1; then
+  if ! umount "${SYS_MOUNT}" >/dev/null 2>&1; then
     imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "Failed to unmount sys_overlay" "       tmpfs filesystem"
   fi
   local lowerdir="${sys_overlay}/data:${SQFS_MOUNT}/SYSTEM"

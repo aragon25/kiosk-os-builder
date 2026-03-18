@@ -1,7 +1,7 @@
 UPD_SQFS_MOUNT="false"
 
 update_cancel() {
-  imgldr_pretty_text "     !!! UPDATE-ERROR !!!" "   An error occurred during" "     system update process!" "   Update files will be removed!"
+  imgldr_pretty_text "     !!! UPDATE-ERROR !!!" "   An error occurred during" "    system update process!" "Update files will be removed!"
   update_umount >/dev/null 2>&1
   imgldr_do_reboot
 }
@@ -21,7 +21,7 @@ update_umount() {
 }
 
 update_start() {
-  if [ -d "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update" ]; then
+  if [ -d "${ROOT_MOUNT}/RAMSTORAGE/sys_update" ]; then
     if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
       imgldr_pretty_text "     SYSTEM UPDATE FOUND" "  PLEASE LEAVE DEVELOPER MODE" "        TO INSTALL IT!"
       sleep 3.0
@@ -29,7 +29,7 @@ update_start() {
     fi
     imgldr_pretty_text "   INSTALLING SYSTEM UPDATE" "   PLEASE DO NOT POWER OFF!"
     cp -f /lib/imgldr/update "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
-    local realpath_update="$(readlink -f "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs")"
+    local realpath_update="$(readlink -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs")"
     local realpath_installed="$(readlink -f "${ROOT_MOUNT}/IMAGES/system.sqfs")"
     local installed_branch="unknown"
     local installed_version="unknown"
@@ -47,7 +47,7 @@ update_start() {
       fi
       echo "Checking update package integrity..."
       if [ ! -d "${UPD_SQFS_MOUNT}/BOOT" ] || [ ! -f "${UPD_SQFS_MOUNT}/INFO/systeminfo" ] ||
-         [ ! -f "${UPD_SQFS_MOUNT}/INFO/scripts.tar" ] ||[ ! -d "${UPD_SQFS_MOUNT}/SYSTEM/sbin/init" ]; then
+         [ ! -f "${UPD_SQFS_MOUNT}/INFO/scripts.tar" ] ||[ ! -f "${UPD_SQFS_MOUNT}/SYSTEM/sbin/init" ]; then
         echo "ERROR: Invalid update file (some files are missing)..."
         update_cancel
         return
@@ -84,7 +84,7 @@ update_start() {
       fi
       if [ -f "${realpath_installed}" ]; then
         echo "Backing up current system.sqfs..."
-        mv -f "${realpath_installed}" "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" >/dev/null 2>&1
+        mv -f "${realpath_installed}" "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" >/dev/null 2>&1
         sleep 2.0
       fi
       echo "Installing new system.sqfs from update package..."
@@ -99,7 +99,7 @@ update_start() {
         return
       fi
       update_umount >/dev/null 2>&1
-      rm -rf "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update" >/dev/null 2>&1
+      rm -rf "${ROOT_MOUNT}/RAMSTORAGE/sys_update" >/dev/null 2>&1
       rm -f "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
       imgldr_pretty_text "    SYSTEM UPDATE FINISHED" "    booting new system..."
       imgldr_do_reboot
@@ -116,19 +116,19 @@ update_check_fail() {
     echo "An error occurred during the last update process."
     echo "Update files will be removed and backup will be restored."
     echo "Please redownload the update package to try again."
-    if [ -f "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" ]; then
+    if [ -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" ]; then
       echo "Restoring backup system.sqfs..."
-      if mount -t squashfs "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" "/mnt/upd_sqfs" >/dev/null 2>&1; then
+      if mount -t squashfs "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" "/mnt/upd_sqfs" >/dev/null 2>&1; then
         UPD_SQFS_MOUNT="/mnt/upd_sqfs"
       else
         imgldr_panic_pretty "     !!! KERNEL PANIC !!!" " Failed to mount backup system.sqfs." " Corrupted backup system.sqfs image!" "   Cannot continue booting!"
       fi
       update_umount >/dev/null 2>&1
       rm -f "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
-      mv -f "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update/system.sqfs.bak" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
+      mv -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
     fi
     echo "Remove files now..."
-    rm -rf "${ROOT_MOUNT}/RAMSTORAGE/var/sys_update" >/dev/null 2>&1
+    rm -rf "${ROOT_MOUNT}/RAMSTORAGE/sys_update" >/dev/null 2>&1
     rm -f "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
     imgldr_do_reboot
   fi

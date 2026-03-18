@@ -2,7 +2,21 @@
 
 [ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
 
+local_mode_check() {
+  if [ -f "${ROOT_MOUNT}/CONFIG/mode" ]; then
+    IMGLDR_MODE="$(cat "${ROOT_MOUNT}/CONFIG/mode" 2>/dev/null)"
+    if [ "$IMGLDR_MODE" = "LOCAL" ] && [ -f "${ROOT_MOUNT}/sbin/init" ]; then
+      imgldr_pretty_text "      !!! LOCAL BOOT !!!"
+      BOOT="local"
+      mkdir -p /conf
+      touch /conf/param.conf
+      echo "BOOT=$BOOT" >> "/conf/param.conf"
+    fi
+  fi
+}
+
 remove_vanilla_scripts() {
+  [ "$BOOT" = "local" ] && return
   if [ -e "/scripts/init-bottom/overlayroot" ]; then
     echo "#!/bin/sh" > /scripts/init-bottom/overlayroot
     echo "exit 0" >> /scripts/init-bottom/overlayroot
@@ -30,6 +44,7 @@ remove_vanilla_scripts() {
   fi
 }
 
+local_mode_check
 remove_vanilla_scripts
 
 exit 0
