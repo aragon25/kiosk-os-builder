@@ -1,0 +1,14 @@
+[Unit]
+Description=Kiosk-OS-Ramsafer: clear logs and refresh fake-hwclock data
+DefaultDependencies=no
+Before=sysinit.target
+Requires=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kiosk-os-ramsafer
+User=root
+
+[Install]
+WantedBy=sysinit.target

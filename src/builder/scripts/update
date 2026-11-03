@@ -1,9 +1,47 @@
 UPD_SQFS_MOUNT="false"
 
 update_cancel() {
-  imgldr_pretty_text "     !!! UPDATE-ERROR !!!" "   An error occurred during" "    system update process!" "Update files will be removed!"
   update_umount >/dev/null 2>&1
-  imgldr_do_reboot
+  sleep 5
+  imgldr_do_reboot 5 "System update failed!" "Update files will be removed!"
+}
+
+update_remove_rescue_file() {
+  [ "${ROOT_MOUNT}" = "false" ] && return 1
+  rm -f "${ROOT_MOUNT}/CONFIG/rescue_script" >/dev/null 2>&1
+}
+
+update_create_rescue_file() {
+  [ "${ROOT_MOUNT}" = "false" ] && return 1
+  mkdir -p "${ROOT_MOUNT}/CONFIG"
+  cat > "${ROOT_MOUNT}/CONFIG/rescue_script" <<'EOF'
+update_failed() {
+  echo "An error occurred during the last update process."
+  echo "Update files will be removed and backup will be restored."
+  echo "Please redownload the update package to try again."
+  echo " "
+  echo "Mounting filesystems..."
+  imgldr_mount_fs
+  if [ -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" ]; then
+    echo "Restoring backup system.sqfs..."
+    if mount -t squashfs "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" "/mnt/upd_sqfs" >/dev/null 2>&1; then
+      UPD_SQFS_MOUNT="/mnt/upd_sqfs"
+    else
+      panic "Failed to mount backup system.sqfs.\nCorrupted backup system.sqfs image!"
+    fi
+    update_umount >/dev/null 2>&1
+    rm -f "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
+    mv -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
+  fi
+  echo "Remove files now..."
+  rm -rf "${ROOT_MOUNT}/RAMSTORAGE/sys_update" >/dev/null 2>&1
+  rm -f "${ROOT_MOUNT}/CONFIG/rescue_script" >/dev/null 2>&1
+  imgldr_do_reboot 5 "Update files removed now!"
+}
+
+update_failed
+EOF
+  chmod +x "${ROOT_MOUNT}/CONFIG/rescue_script"
 }
 
 update_umount() {
@@ -21,16 +59,17 @@ update_umount() {
 }
 
 update_start() {
+  [ "${ROOT_MOUNT}" = "false" ] && return 1
   if [ -d "${ROOT_MOUNT}/RAMSTORAGE/sys_update" ]; then
-    if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
+    if [ "$IMAGE_MODE" = "DEVELOPER" ]; then
       imgldr_pretty_text "     SYSTEM UPDATE FOUND" "  PLEASE LEAVE DEVELOPER MODE" "        TO INSTALL IT!"
       sleep 3.0
       return
     fi
     imgldr_pretty_text "   INSTALLING SYSTEM UPDATE" "   PLEASE DO NOT POWER OFF!"
-    cp -f /lib/imgldr/update "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
-    local realpath_update="$(readlink -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs")"
-    local realpath_installed="$(readlink -f "${ROOT_MOUNT}/IMAGES/system.sqfs")"
+    update_create_rescue_file
+    local realpath_update="$(realpath "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs")"
+    local realpath_installed="$(realpath "${ROOT_MOUNT}/IMAGES/system.sqfs")"
     local installed_branch="unknown"
     local installed_version="unknown"
     local update_branch="unknown"
@@ -99,10 +138,10 @@ update_start() {
         return
       fi
       update_umount >/dev/null 2>&1
+      echo "Removing temporary update files..."
       rm -rf "${ROOT_MOUNT}/RAMSTORAGE/sys_update" >/dev/null 2>&1
-      rm -f "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
-      imgldr_pretty_text "    SYSTEM UPDATE FINISHED" "    booting new system..."
-      imgldr_do_reboot
+      update_remove_rescue_file
+      imgldr_do_reboot 5 "System update installed successfully!" "Booting new system now..."
     else
       echo "ERROR: Could not find 'system.sqfs' in update package!"
       update_cancel
@@ -110,28 +149,3 @@ update_start() {
     fi
   fi
 }
-
-update_check_fail() {
-  if [ -f "${ROOT_MOUNT}/CONFIG/update_tmp" ]; then
-    echo "An error occurred during the last update process."
-    echo "Update files will be removed and backup will be restored."
-    echo "Please redownload the update package to try again."
-    if [ -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" ]; then
-      echo "Restoring backup system.sqfs..."
-      if mount -t squashfs "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" "/mnt/upd_sqfs" >/dev/null 2>&1; then
-        UPD_SQFS_MOUNT="/mnt/upd_sqfs"
-      else
-        imgldr_panic_pretty "     !!! KERNEL PANIC !!!" " Failed to mount backup system.sqfs." " Corrupted backup system.sqfs image!" "   Cannot continue booting!"
-      fi
-      update_umount >/dev/null 2>&1
-      rm -f "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
-      mv -f "${ROOT_MOUNT}/RAMSTORAGE/sys_update/system.sqfs.bak" "${ROOT_MOUNT}/IMAGES/system.sqfs" >/dev/null 2>&1
-    fi
-    echo "Remove files now..."
-    rm -rf "${ROOT_MOUNT}/RAMSTORAGE/sys_update" >/dev/null 2>&1
-    rm -f "${ROOT_MOUNT}/CONFIG/update_tmp" >/dev/null 2>&1
-    imgldr_do_reboot
-  fi
-}
-
-update_check_fail

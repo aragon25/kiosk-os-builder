@@ -20,7 +20,7 @@ ROOT_MOUNT="false"
 BOOT_MOUNT="false"
 SQFS_MOUNT="false"
 SYSTEM_UPDATED="false"
-IMGLDR_MODE="RAMDISK"
+IMAGE_MODE="RAMDISK"
 RESET_USERDATA="false"
 FIRSTBOOT=no
 
@@ -166,11 +166,11 @@ auto_reboot_addon() {
 get_variables() {
   [ "$ROOT_MOUNT" != "true" ] && return 0
   if [ -f /mnt/tmproot/CONFIG/mode ]; then
-    IMGLDR_MODE="$(cat /mnt/tmproot/CONFIG/mode 2>/dev/null)"
-    if [ "$IMGLDR_MODE" != "RAMDISK" ] && [ "$IMGLDR_MODE" != "DEVELOPER" ] && [ "$IMGLDR_MODE" != "STORED" ]; then
+    IMAGE_MODE="$(cat /mnt/tmproot/CONFIG/mode 2>/dev/null)"
+    if [ "$IMAGE_MODE" != "RAMDISK" ] && [ "$IMAGE_MODE" != "DEVELOPER" ] && [ "$IMAGE_MODE" != "STORED" ]; then
       pretty_text "     !!! CONFIG ERROR !!!" "   Invalid mode in config!" "   Defaulting to RAMDISK mode!"
       sleep 3.0
-      IMGLDR_MODE="RAMDISK"
+      IMAGE_MODE="RAMDISK"
     fi
   fi
   if [ -f /mnt/tmproot/CONFIG/reset ]; then
@@ -204,7 +204,7 @@ check_update() {
       return
     fi
     if [ -d /mnt/tmproot/IMAGES/update ]; then
-      if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then
+      if [ "$IMAGE_MODE" = "DEVELOPER" ]; then
         pretty_text "     SYSTEM UPDATE FOUND" "  PLEASE LEAVE DEVELOPER MODE" "        TO INSTALL IT!"
         sleep 3.0
         return
@@ -272,11 +272,11 @@ remove_vanilla_scripts() {
 
 export_variables() {
   mkdir -p /conf
-  touch /conf/param.conf
-  echo "BOOT=$BOOT" >> "/conf/param.conf"
-  echo "IMGLDR_MODE=$IMGLDR_MODE" >> "/conf/param.conf"
-  echo "RESET_USERDATA=$RESET_USERDATA" >> "/conf/param.conf"
-  echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/param.conf"
+  touch /conf/imgldr.conf
+  echo "BOOT=$BOOT" >> "/conf/imgldr.conf"
+  echo "IMAGE_MODE=$IMAGE_MODE" >> "/conf/imgldr.conf"
+  echo "RESET_USERDATA=$RESET_USERDATA" >> "/conf/imgldr.conf"
+  echo "FIRSTBOOT=$FIRSTBOOT" >> "/conf/imgldr.conf"
 }
 
 get_cmdline

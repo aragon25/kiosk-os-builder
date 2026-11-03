@@ -1,0 +1,14 @@
+#!/bin/bash
+counter=0
+  while true; do
+    if [ $counter -le 0 ]; then
+      find /var/log -type f -exec truncate -s 0 {} \; >/dev/null 2>&1
+      journalctl --rotate >/dev/null 2>&1
+      journalctl --vacuum-time=1s >/dev/null 2>&1
+      fake-hwclock save >/dev/null 2>&1
+      counter=15
+    else
+      (( counter-- ))
+    fi
+    sleep 60
+  done

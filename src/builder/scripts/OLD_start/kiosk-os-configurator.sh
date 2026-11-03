@@ -773,6 +773,7 @@ EOF
         sed -i "s/$/ cfg80211.ieee80211_regdom=$REGDOMAIN/g" $BOOTDIR/cmdline.txt
       fi
       sed -i "s/^REGDOMAIN=.*$/REGDOMAIN=$REGDOMAIN/" /etc/default/crda >/dev/null 2>&1
+      sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' /var/lib/NetworkManager/NetworkManager.state >/dev/null 2>&1
       iw reg set "$REGDOMAIN" >/dev/null 2>&1
       rfkill unblock wifi >/dev/null 2>&1
       local filename

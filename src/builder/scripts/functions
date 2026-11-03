@@ -1,0 +1,21 @@
+#!/bin/sh
+
+[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
+
+FIRSTBOOT_CONF="${ROOT_MOUNT}/CONFIG/firstboot"
+STORAGE_DIR="${IMAGE_DATA}/storage"
+CONFIG_DIR="${IMAGE_DATA}/config"
+USERDATA_DIR="${IMAGE_DATA}/user_data"
+DEVELOPER_DIR="${IMAGE_DATA}/devel_data"
+IMAGES_DIR="${ROOT_MOUNT}/IMAGES"
+SYS_MOUNT="/mnt/sys_final"
+
+imgldr_clear_screen() {
+  command -v clear >/dev/null 2>&1 && clear
+  command -v reload_splash >/dev/null 2>&1 && reload_splash
+  [ "$DEBUG_MODE" = "true" ] && imgldr_pretty_text "  !!! DEBUG MODE ENABLED !!!" "Booting with debug scripts..." "Image: ${IMAGE_LOAD}" "Boot:  ${BOOT_MODE}"
+  [ "$DEBUG_MODE" != "true" ] && [ "$BOOT_MODE" = "local" ] && imgldr_pretty_text "      !!! LOCAL BOOT !!!" "      Booting from local" "       installation..."
+  [ "$DEBUG_MODE" = "true" ] && [ "$IMAGE_MODE" = "RAMDISK" ] && imgldr_pretty_text "     !!! RAMDISK BOOT !!!"
+  [ "$IMAGE_MODE" = "STORED" ] && imgldr_pretty_text "     !!! STORED BOOT !!!"
+  [ "$IMAGE_MODE" = "DEVELOPER" ] && imgldr_pretty_text "    !!! DEVELOPER BOOT !!!" "  Changes here will be saved" " separated from other modes!"  "And removed after leaving it!"
+}

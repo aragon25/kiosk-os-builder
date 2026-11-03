@@ -1,61 +1,393 @@
 #!/bin/sh
 
-[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
+# rootfs, bootfs and sqfs-image are mounted yet at this point.
+
+SCRIPT_PATH="$(realpath "$0")"
+SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+
+[ -e "${SCRIPT_DIR}/functions" ] && . "${SCRIPT_DIR}/functions" || exit 1
+
+check_modules() {
+  if ! modprobe overlay; then
+    panic "Failed to load overlayfs kernel module"
+  fi
+}
+
+build_sys_mount() {
+  firstboot_tasks() {
+    ## perform firstboot setup tasks
+    # reload firstboot config from stored image data if exists to apply original changes
+    if [ -f "${STORAGE_DIR}/firstboot" ]; then
+      local firstboot_conf="${STORAGE_DIR}/firstboot"
+      FB_USERNAME=$(sed -n 's/^[[:space:]]*USERNAME[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_PASSWORD=$(sed -n 's/^[[:space:]]*PASSWORD[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_HOSTNAME=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_WIFI_COUNTRY=$(sed -n 's/^[[:space:]]*WIFI_COUNTRY[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_WIFI_SSID=$(sed -n 's/^[[:space:]]*WIFI_SSID[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_WIFI_KEY=$(sed -n 's/^[[:space:]]*WIFI_KEY[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_WIFI_HIDDEN=$(sed -n 's/^[[:space:]]*WIFI_HIDDEN[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_KEYMAP=$(sed -n 's/^[[:space:]]*KEYMAP[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_TIMEZONE=$(sed -n 's/^[[:space:]]*TIMEZONE[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+      FB_ENABLE_SSH=$(sed -n 's/^[[:space:]]*ENABLE_SSH[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
+    elif [ -f "${FIRSTBOOT_CONF}" ]; then
+      cp -f "${FIRSTBOOT_CONF}" "${STORAGE_DIR}/firstboot"
+    else
+      touch "${STORAGE_DIR}/firstboot"
+    fi
+    # trixie fixes
+    rm -f "${SYS_MOUNT}/etc/issue.d/IP.issue" >/dev/null 2>&1
+    mkdir -p "${SYS_MOUNT}/etc/cloud" >/dev/null 2>&1
+    touch "${SYS_MOUNT}/etc/cloud/cloud-init.disabled" >/dev/null 2>&1
+    chroot "${SYS_MOUNT}" apt-get purge cloud-guest-utils cloud-init --yes >/dev/null 2>&1
+    #rebuildMachineID
+    rm -f "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
+    rm -f "${SYS_MOUNT}/var/lib/dbus/machine-id" >/dev/null 2>&1
+    [ -f "${STORAGE_DIR}/machine-id" ] && cp -f "${STORAGE_DIR}/machine-id" "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
+    chroot "${SYS_MOUNT}" systemd-machine-id-setup >/dev/null 2>&1
+    chmod 644 "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
+    ln -fs /etc/machine-id "${SYS_MOUNT}/var/lib/dbus/machine-id" >/dev/null 2>&1
+    [ ! -f "${STORAGE_DIR}/machine-id" ] && cp -f "${SYS_MOUNT}/etc/machine-id" "${STORAGE_DIR}/machine-id" >/dev/null 2>&1
+    #rebuildSSHKeyPairs
+    mkdir -p "${SYS_MOUNT}/etc/ssh" >/dev/null 2>&1
+    rm -f "${SYS_MOUNT}/etc/ssh/"*"_key"* >/dev/null 2>&1
+    if ls "${STORAGE_DIR}/ssh_keys/"*"_key"* >/dev/null 2>&1; then
+      cp -f "${STORAGE_DIR}/ssh_keys/"*"_key"* "${SYS_MOUNT}/etc/ssh/" >/dev/null 2>&1
+      chmod 600 "${SYS_MOUNT}/etc/ssh/"*"_key"* >/dev/null 2>&1
+    else
+      chroot "${SYS_MOUNT}" ssh-keygen -A >/dev/null 2>&1
+      mkdir -p "${STORAGE_DIR}/ssh_keys" >/dev/null 2>&1
+      rm -f "${STORAGE_DIR}/ssh_keys/"*"_key"* >/dev/null 2>&1
+      cp -f "${SYS_MOUNT}/etc/ssh/"*"_key"* "${STORAGE_DIR}/ssh_keys/" >/dev/null 2>&1
+    fi
+    #SetupSystemUser
+    [ -z "$FB_USERNAME" ] && FB_USERNAME="admin"
+    [ -z "$FB_PASSWORD" ] && FB_PASSWORD='$1$25pgtsyy$hoEN68XR9byPK/RdSElWa/'
+    local first_userid=$(awk -F: '$3 >= 1000 && $1 != "nobody" { print $3; exit }' "${SYS_MOUNT}/etc/passwd" 2>/dev/null)
+    local first_username=$(awk -F: -v uid="$first_userid" '$3 == uid { print $1; exit }' "${SYS_MOUNT}/etc/passwd" 2>/dev/null)
+    local first_usergid=$(awk -F: -v uid="$first_userid" '$3 == uid { print $4; exit }' "${SYS_MOUNT}/etc/passwd" 2>/dev/null)
+    local first_usergname=$(awk -F: -v gid="$first_usergid" '$3 == gid { print $1; exit }' "${SYS_MOUNT}/etc/group" 2>/dev/null)
+    local first_userhome=$(awk -F: -v uid="$first_userid" '$3 == uid { print $6; exit }' "${SYS_MOUNT}/etc/passwd" 2>/dev/null)
+    if [ ! -f "${USERDATA_DIR}/data/kiosk/etc/passwd" ]; then
+      if [ -n "$first_username" ]; then
+        chroot "${SYS_MOUNT}" usermod -p $FB_PASSWORD $first_username >/dev/null 2>&1
+        chroot "${SYS_MOUNT}" groupmod -n admin $first_usergname >/dev/null 2>&1
+        chroot "${SYS_MOUNT}" usermod -d "/home/admin" $first_username >/dev/null 2>&1
+        chroot "${SYS_MOUNT}" usermod -l $FB_USERNAME $first_username >/dev/null 2>&1
+        rm -rf "${SYS_MOUNT}${first_userhome}" >/dev/null 2>&1
+        cp -rf "${SYS_MOUNT}/etc/skel"/. "${SYS_MOUNT}/home/admin" >/dev/null 2>&1
+        chown -R ${first_userid}:${first_usergid} "${SYS_MOUNT}/home/admin" >/dev/null 2>&1
+        rm -f "${SYS_MOUNT}/etc/sudoers.d/010_"*"-nopasswd" >/dev/null 2>&1
+        echo "$FB_USERNAME ALL=(ALL) NOPASSWD: ALL" > "${SYS_MOUNT}/etc/sudoers.d/010_admin-nopasswd"
+        chown 0:0 "${SYS_MOUNT}/etc/sudoers.d/010_admin-nopasswd" >/dev/null 2>&1
+        chmod -f 440 "${SYS_MOUNT}/etc/sudoers.d/010_admin-nopasswd" >/dev/null 2>&1
+      else
+        imgldr_dialog --timeout 5 --title "!!! WARNING !!!" --infobox "\nFailed to setup first user!\nNo existing user found in system." 12 50
+      fi
+    fi
+    # Disable swapfile in rammode
+    if [ "$IMAGE_MODE" = "RAMDISK" ]; then
+      if [ -f "${SYS_MOUNT}/usr/lib/systemd/system/dphys-swapfile.service" ]; then
+        chroot "${SYS_MOUNT}" systemctl disable dphys-swapfile >/dev/null 2>&1
+      fi
+      if [ -f "${SYS_MOUNT}/etc/rpi/swap.conf" ]; then
+        mkdir -p "${SYS_MOUNT}/etc/rpi/swap.conf.d" >/dev/null 2>&1
+        echo "[Main]" > "${SYS_MOUNT}/etc/rpi/swap.conf.d/99-disable-swap.conf"
+        echo "Mechanism=none" >> "${SYS_MOUNT}/etc/rpi/swap.conf.d/99-disable-swap.conf"
+      fi
+    fi
+    # Change hostname
+    if [ "$FB_HOSTNAME" != "" ]; then
+      echo "$FB_HOSTNAME" > "${SYS_MOUNT}/etc/hostname"
+      if grep -q "^127\.0\.1\.1" "${SYS_MOUNT}/etc/hosts" 2>/dev/null; then
+        sed -i "s|^127\.0\.1\.1[[:space:]].*|127.0.1.1    ${FB_HOSTNAME}|" "${SYS_MOUNT}/etc/hosts"
+      else
+        echo "127.0.1.1    ${FB_HOSTNAME}" >> "${SYS_MOUNT}/etc/hosts"
+      fi
+    fi
+    # change timezone
+    if [ "$FB_TIMEZONE" != "" ]; then
+      rm -f "${SYS_MOUNT}/etc/localtime" >/dev/null 2>&1
+      echo "$FB_TIMEZONE" > "${SYS_MOUNT}/etc/timezone"
+      chroot "${SYS_MOUNT}" dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1
+    fi
+    # change keymap
+    if [ "$FB_KEYMAP" != "" ]; then
+      rm -f "${SYS_MOUNT}/etc/console-setup/cached_"* >/dev/null 2>&1
+      cat >"${SYS_MOUNT}/etc/default/keyboard" <<EOF
+XKBMODEL="pc105"
+XKBLAYOUT="$FB_KEYMAP"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+
+EOF
+      chroot "${SYS_MOUNT}" dpkg-reconfigure -f noninteractive keyboard-configuration >/dev/null 2>&1
+    fi
+    # enable ssh if configured
+    [ "$FB_ENABLE_SSH" = "true" ] && chroot "${SYS_MOUNT}" systemctl enable ssh >/dev/null 2>&1
+    # network configuration
+    if [ -n "$FB_WIFI_SSID" ] && [ -n "$FB_WIFI_KEY" ]; then
+      rm -f "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant"*".conf" >/dev/null 2>&1
+      rm -f "${SYS_MOUNT}/etc/NetworkManager/system-connections/sqfs_"*".nmconnection" >/dev/null 2>&1
+      mkdir -p "${SYS_MOUNT}/etc/wpa_supplicant" >/dev/null 2>&1
+      mkdir -p "${SYS_MOUNT}/etc/NetworkManager/system-connections" >/dev/null 2>&1
+      cat >"${SYS_MOUNT}/etc/NetworkManager/system-connections/sqfs_firstboot.nmconnection" <<EOF
+[connection]
+id=sqfs_firstboot
+uuid=$(cat /proc/sys/kernel/random/uuid)
+type=wifi
+interface-name=wlan0
+permissions=
+[wifi]
+mac-address-blacklist=
+mode=infrastructure
+ssid=$FB_WIFI_SSID
+hidden=$FB_WIFI_HIDDEN
+[wifi-security]
+auth-alg=open
+key-mgmt=wpa-psk
+psk=$FB_WIFI_KEY
+[ipv4]
+dns-search=
+method=auto
+[ipv6]
+addr-gen-mode=stable-privacy
+dns-search=
+method=auto
+EOF
+      chown -f 0:0 "${SYS_MOUNT}/etc/NetworkManager/system-connections/sqfs_firstboot.nmconnection" >/dev/null 2>&1
+      chmod -f 600 "${SYS_MOUNT}/etc/NetworkManager/system-connections/sqfs_firstboot.nmconnection" >/dev/null 2>&1
+      cat >"${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf" <<EOF
+country=$WIFI_COUNTRY
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+ap_scan=1
+update_config=1
+EOF
+      echo "network={" >> "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf"
+      [ "$FB_WIFI_HIDDEN" != "false" ] && echo "  scan_ssid=1" >> "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf"
+      echo "  ssid=\"$FB_WIFI_SSID\"" >> "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf"
+      echo "  psk=$FB_WIFI_KEY" >> "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf"
+      echo "}" >> "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf"
+      chown -f 0:0 "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf" >/dev/null 2>&1
+      chmod -f 600 "${SYS_MOUNT}/etc/wpa_supplicant/wpa_supplicant-sqfs_firstboot.conf" >/dev/null 2>&1
+    fi
+    # Change wifi_country & unblock
+    if [ -n "$FB_WIFI_COUNTRY" ] && grep -q "^${FB_WIFI_COUNTRY}[[:space:]]" "${SYS_MOUNT}/usr/share/zoneinfo/iso3166.tab" 2>/dev/null; then
+      if ! grep -q "cfg80211.ieee80211_regdom=$FB_WIFI_COUNTRY" "$BOOT_MOUNT/cmdline.txt"; then
+        sed -i 's|cfg80211\.ieee80211_regdom=[^ ]* \{0,1\}||g' "$BOOT_MOUNT/cmdline.txt" >/dev/null 2>&1
+        sed -i 's|[ \t]*$||' "$BOOT_MOUNT/cmdline.txt"
+        sed -i "s/$/ cfg80211.ieee80211_regdom=$FB_WIFI_COUNTRY/g" "$BOOT_MOUNT/cmdline.txt"
+      fi
+      if ! grep -q "REGDOMAIN=$FB_WIFI_COUNTRY" "${SYS_MOUNT}/etc/default/crda" 2>/dev/null; then
+          sed -i "s/^REGDOMAIN=.*$/REGDOMAIN=$FB_WIFI_COUNTRY/" "${SYS_MOUNT}/etc/default/crda" >/dev/null 2>&1
+      fi
+      if ! grep -q "WirelessEnabled=true" "${SYS_MOUNT}/var/lib/NetworkManager/NetworkManager.state" 2>/dev/null; then
+        sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' "${SYS_MOUNT}/var/lib/NetworkManager/NetworkManager.state" >/dev/null 2>&1
+      fi
+      chroot "${SYS_MOUNT}" rfkill unblock wifi >/dev/null 2>&1
+      local filename
+      for filename in "${SYS_MOUNT}/var/lib/systemd/rfkill/"*:wlan ; do
+        echo 0 > "$filename"
+      done
+    fi
+    # add ramsafer in RAMDISK mode
+    if [ "$IMAGE_MODE" = "RAMDISK" ]; then
+      cp -f "${SCRIPT_DIR}/files/kiosk-ramsafer.service" "${SYS_MOUNT}/etc/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
+      chown 0:0 "${SYS_MOUNT}/etc/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
+      chmod 755 "${SYS_MOUNT}/etc/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
+      cp -f "${SCRIPT_DIR}/files/kiosk-ramsaferd" "${SYS_MOUNT}/usr/bin/kiosk-ramsaferd" >/dev/null 2>&1
+      chown 0:0 "${SYS_MOUNT}/usr/bin/kiosk-ramsaferd" >/dev/null 2>&1
+      chmod 755 "${SYS_MOUNT}/usr/bin/kiosk-ramsaferd" >/dev/null 2>&1
+      chroot "${SYS_MOUNT}" systemctl daemon-reload >/dev/null 2>&1
+      chroot "${SYS_MOUNT}" systemctl enable kiosk-ramsafer >/dev/null 2>&1
+    fi
+    #generate motd
+    mkdir -p "${SYS_MOUNT}/etc/update-motd.d" >/dev/null 2>&1
+    rm -f "${SYS_MOUNT}/etc/motd" >/dev/null 2>&1
+    cat >>"${SYS_MOUNT}/etc/motd" <<EOF
+#################################################
+#   WARNING: Unauthorized access is prohibited. #
+#################################################
+EOF
+    rm -f "${SYS_MOUNT}/etc/update-motd.d/"* >/dev/null 2>&1
+    cp -f "${SCRIPT_DIR}/files/motd_sysinfo" "${SYS_MOUNT}/etc/update-motd.d/10-sysinfo" >/dev/null 2>&1
+    chown 0:0 "${SYS_MOUNT}/etc/update-motd.d/10-sysinfo"
+    chmod 755 "${SYS_MOUNT}/etc/update-motd.d/10-sysinfo"
+    # end here in developer mode
+    [ "$IMAGE_MODE" = "DEVELOPER" ] && return 0
+    # disable package managers and rpi-update in non-developer mode
+    echo -e '#!/bin/sh\necho "raspi-config is deactivated!"' > "${SYS_MOUNT}/usr/bin/raspi-config"
+    chmod +x "${SYS_MOUNT}/usr/bin/raspi-config" >/dev/null 2>&1
+    echo -e '#!/bin/sh\necho "rpi-update is deactivated!"' > "${SYS_MOUNT}/usr/bin/rpi-update"
+    chmod +x "${SYS_MOUNT}/usr/bin/rpi-update" >/dev/null 2>&1
+    echo -e '#!/bin/sh\necho "apt is deactivated!"' > "${SYS_MOUNT}/usr/bin/apt"
+    chmod +x "${SYS_MOUNT}/usr/bin/apt" >/dev/null 2>&1
+    echo -e '#!/bin/sh\necho "apt-get is deactivated!"' > "${SYS_MOUNT}/usr/bin/apt-get"
+    chmod +x "${SYS_MOUNT}/usr/bin/apt-get" >/dev/null 2>&1
+    echo -e '#!/bin/sh\necho "apt-cache is deactivated!"' > "${SYS_MOUNT}/usr/bin/apt-cache"
+    chmod +x "${SYS_MOUNT}/usr/bin/apt-cache" >/dev/null 2>&1
+    echo -e '#!/bin/sh\necho "apt-mark is deactivated!"' > "${SYS_MOUNT}/usr/bin/apt-mark"
+    chmod +x "${SYS_MOUNT}/usr/bin/apt-mark" >/dev/null 2>&1
+    echo -e '#!/bin/sh\necho "dpkg is deactivated!"' > "${SYS_MOUNT}/usr/bin/dpkg"
+    chmod +x "${SYS_MOUNT}/usr/bin/dpkg" >/dev/null 2>&1
+  }
+  add_state_files() {
+    # copy state files to /usr/lib/imgldr for use in later stages
+    mkdir -p "${SYS_MOUNT}/usr/lib/imgldr"
+    [ -f "${SQFS_MOUNT}/INFO/systeminfo" ] && cp -f "${SQFS_MOUNT}/INFO/systeminfo" "${SYS_MOUNT}/usr/lib/imgldr/sysinfo"
+    [ -f /conf/imgldr.conf ] && cp -f /conf/imgldr.conf "${SYS_MOUNT}/usr/lib/imgldr/params"
+  }
+  initramfs_splash_addon() {
+    # add initramfs-splash plymouth theme to SYS_MOUNT if configured and available
+    [ "$IMAGE_MODE" = "DEVELOPER" ] && return 0
+    local splashpth="/etc/splash"
+    local splashimg="splash.png"
+    local splashply="inactive"
+    local splashopt="center"
+    if [ -f "$splashpth/splash.config" ]; then
+      splashimg=$(sed -n 's/^[[:space:]]*imagefile[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)
+      [ -z "$splashimg" ] && splashimg="splash.png"
+      [ "$(sed -n 's/^[[:space:]]*plymouth[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)" = "1" ] && splashply="active"
+      [ "$(sed -n 's/^[[:space:]]*fullscreen[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)" = "1" ] && splashopt="fullscreen"
+      [ "$(sed -n 's/^[[:space:]]*stretch[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)" = "1" ] && splashopt="stretch"
+    else
+      return
+    fi
+    [ "$splashply" = "inactive" ] && return
+    [ ! -f "$splashpth/splash_script" ] && return
+    [ ! -f "$splashpth/splash_plymouth" ] && return
+    [ ! -f "$splashpth/$splashimg" ] && return
+    [ ! -d "${SYS_MOUNT}/usr/share/plymouth/themes" ] && return
+    mkdir -p "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash" >/dev/null 2>&1
+    cp -f "$splashpth/splash_script" "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.script" >/dev/null 2>&1
+    cp -f "$splashpth/splash_plymouth" "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.plymouth" >/dev/null 2>&1
+    cp -f "$splashpth/$splashimg" "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/$splashimg" >/dev/null 2>&1
+    sed -i 's#^[[:space:]]*imagefile[[:space:]]*=.*#imagefile = "'"$splashimg"'";#' \
+      "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.script" >/dev/null 2>&1
+    sed -i 's#^[[:space:]]*mode[[:space:]]*=.*#mode = "'"$splashopt"'";#' \
+      "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/initramfs-splash.script" >/dev/null 2>&1
+    echo "[Daemon]" > "${SYS_MOUNT}/etc/plymouth/plymouthd.conf"
+    echo "Theme=initramfs-splash" >> ${SYS_MOUNT}/etc/plymouth/plymouthd.conf
+    echo "1" > "${SYS_MOUNT}/usr/share/plymouth/themes/initramfs-splash/plymouth_forced"
+  }
+  rpi_spinner_addon() {
+    # sync plymouth-rpi-spinner with fbsplash
+    [ "$IMAGE_MODE" = "DEVELOPER" ] && return 0
+    local splashpth="/etc/splash"
+    local splashimg="splash.png"
+    if [ -f "$splashpth/splash.config" ]; then
+      splashimg=$(sed -n 's/^[[:space:]]*imagefile[[:space:]]*=[[:space:]]*//p' "$splashpth/splash.config" | head -n1)
+      [ -z "$splashimg" ] && splashimg="splash.png"
+    fi
+    [ ! -f "$splashpth/$splashimg" ] && return
+    [ ! -f "${SYS_MOUNT}/usr/share/plymouth/themes/rpi-spinner/rpi-spinner.script" ] && return
+    cp -f "$splashpth/$splashimg" "${SYS_MOUNT}/usr/share/plymouth/themes/rpi-spinner/$splashimg"
+    sed -i "s/LOGO.PNG/${splashimg}/g" "${SYS_MOUNT}/usr/share/plymouth/themes/rpi-spinner/rpi-spinner.script"
+  }
+  persist_storage_addon() {
+    #create persist_storage script
+    [ "$IMAGE_MODE" = "DEVELOPER" ] && return 0
+    tee ${SYS_MOUNT}/usr/local/bin/create-user-link > /dev/null <<'EOF'
+#!/bin/sh
+USER_NAME="$PAM_USER"
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+TARGET="/var/sqfs/storage/userhome/$USER_NAME"
+LINK="$HOME_DIR/STORAGE"
+[ -n "$USER_NAME" ] || exit 0
+[ -n "$HOME_DIR" ] || exit 0
+[ -d "$HOME_DIR" ] || exit 0
+mkdir -p "$TARGET"
+chown -f "$USER_NAME":"$USER_NAME" "$TARGET"
+rm -fR "$LINK"
+ln -s "$TARGET" "$LINK"
+exit 0
+EOF
+    chmod +x ${SYS_MOUNT}/usr/local/bin/create-user-link
+  }
+  # generate SYS_MOUNT as read-write to do necessary modifications
+  local sys_overlay="/mnt/sys_overlay"
+  local lowerdir="${SQFS_MOUNT}/SYSTEM"
+  local upperdir="${sys_overlay}/data"
+  local workdir="${sys_overlay}/work"
+  mkdir -p "$sys_overlay"
+  mount -t tmpfs tmpfs "$sys_overlay"
+  mkdir -p "${upperdir}" "${workdir}"
+  mkdir -p "${SYS_MOUNT}"
+  if ! mount -t overlay overlay \
+      -o lowerdir="${lowerdir}",upperdir="${upperdir}",workdir="${workdir}" "${SYS_MOUNT}"; then
+    panic "Failed to generate sqfs overlay file system"
+  fi
+  mount --bind /dev ${SYS_MOUNT}/dev >/dev/null 2>&1 || panic "Failed to bind mount sys_overlay dev"
+  mount --bind /proc ${SYS_MOUNT}/proc >/dev/null 2>&1 || panic "Failed to bind mount sys_overlay proc"
+  mount --bind /sys ${SYS_MOUNT}/sys >/dev/null 2>&1 || panic "Failed to bind mount sys_overlay sys"
+  # RUN PREPARATION STEPS ON SYS_MOUNT HERE BEFORE REMOUNTING IT AS READ-ONLY
+  firstboot_tasks
+  add_state_files
+  rpi_spinner_addon
+  initramfs_splash_addon
+  persist_storage_addon
+  # make SYS_MOUNT read-only to prevent modifications to the base system
+  umount "${SYS_MOUNT}/dev" >/dev/null 2>&1 || panic "Failed to unmount sys_overlay dev bind mount"
+  umount "${SYS_MOUNT}/proc" >/dev/null 2>&1 || panic "Failed to unmount sys_overlay proc bind mount"
+  umount "${SYS_MOUNT}/sys" >/dev/null 2>&1 || panic "Failed to unmount sys_overlay sys bind mount"
+  umount "${SYS_MOUNT}" >/dev/null 2>&1 || panic "Failed to unmount sys_overlay tmpfs filesystem"
+  local lowerdir="${sys_overlay}/data:${SQFS_MOUNT}/SYSTEM"
+  if ! mount -t overlay overlay \
+      -o lowerdir="${lowerdir}" "${SYS_MOUNT}"; then
+    panic "Failed to finalize sqfs overlay file system"
+  fi
+}
 
 mount_root_fs()
 {
   local lowerdir
   local upperdir
   local workdir
-
-  # Check needed modules
-  if ! modprobe overlay; then
-    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "   Failed to load overlayfs" "        kernel module"
-  fi
-
   # Check sysoverlay status
   if [ -z "${SYS_MOUNT}" ] || [ ! -d "${SYS_MOUNT}" ]; then
-    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount sys_overlay" "       tmpfs filesystem"
+    panic "Failed to mount sys_overlay tmpfs filesystem"
   fi
-
   # Mount the final root filesystem overlay at ${rootmnt} and handle different modes
-  if [ "$IMGLDR_MODE" = "DEVELOPER" ]; then 
+  if [ "$IMAGE_MODE" = "DEVELOPER" ]; then 
     lowerdir="${SYS_MOUNT}"
-    upperdir="${ROOT_MOUNT}/DEVELOPER/data"
-    workdir="${ROOT_MOUNT}/DEVELOPER/work"
+    upperdir="${DEVELOPER_DIR}/data"
+    workdir="${DEVELOPER_DIR}/work"
     mkdir -p "${upperdir}" "${workdir}"
     if ! mount -t overlay overlay \
         -o lowerdir="${lowerdir}",upperdir="${upperdir}",workdir="${workdir}" "${rootmnt}"; then
-      imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount overlayfs" " as root overlay file system"
+      panic "Failed to mount overlayfs as root overlay file system"
     fi
-  elif [ "$IMGLDR_MODE" = "RAMDISK" ] || [ "$IMGLDR_MODE" = "STORED" ]; then
+  elif [ "$IMAGE_MODE" = "RAMDISK" ] || [ "$IMAGE_MODE" = "STORED" ]; then
     lowerdir="${SYS_MOUNT}"
     if ! mount -o bind "$SYS_MOUNT" "${rootmnt}"; then
-      imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount overlayfs" " as root overlay file system"
+      panic "Failed to mount overlayfs as root overlay file system"
     fi
-    if [ "$IMGLDR_MODE" = "RAMDISK" ]; then
+    if [ "$IMAGE_MODE" = "RAMDISK" ]; then
       mkdir -p /mnt/sys_ramfs
       mount -t tmpfs tmpfs "/mnt/sys_ramfs"
-      mkdir -p "${ROOT_MOUNT}/USERDATA/data"
-      lowerdir="${ROOT_MOUNT}/USERDATA/data:${rootmnt}/var"
+      mkdir -p "${USERDATA_DIR}/data"
+      lowerdir="${USERDATA_DIR}/data:${rootmnt}/var"
       upperdir="/mnt/sys_ramfs/data"
       workdir="/mnt/sys_ramfs/work"
     else
       lowerdir="${rootmnt}/var"
-      upperdir="${ROOT_MOUNT}/USERDATA/data"
-      workdir="${ROOT_MOUNT}/USERDATA/work"
+      upperdir="${USERDATA_DIR}/data"
+      workdir="${USERDATA_DIR}/work"
     fi
     mkdir -p "${upperdir}" "${workdir}"
     if ! mount -t overlay overlay \
         -o lowerdir="${lowerdir}",upperdir="${upperdir}",workdir="${workdir}" "${rootmnt}/var"; then
-      imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "  Failed to mount overlayfs" " as var overlay file system"
+      panic "Failed to mount overlayfs as var overlay file system"
     fi
   else
-    imgldr_panic_pretty "     !!! KERNEL PANIC !!!" "      Invalid mode set!" "$IMGLDR_MODE" "   could not boot properly!"
+    panic "Invalid mode set! $IMAGE_MODE could not boot properly!"
     sleep 3.0
   fi
 }
 
+check_modules
+build_sys_mount
 mount_root_fs
 
 exit 0

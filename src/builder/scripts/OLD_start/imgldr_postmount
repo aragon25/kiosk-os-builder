@@ -128,7 +128,7 @@ local_mount_root()
   fi
 
   #Restore boot partition if needed
-  if [ "$IMGLDR_MODE" != "DEVELOPER" ]; then
+  if [ "$IMAGE_MODE" != "DEVELOPER" ]; then
     if [ -d /mnt/syssqfs/BOOT ]; then
       for filepath in /mnt/syssqfs/BOOT/*; do
         filename=$(basename "${filepath}")

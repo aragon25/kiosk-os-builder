@@ -1,0 +1,35 @@
+#!/bin/bash
+export LC_ALL=C
+export LANG=C
+sys_image="$(sed -n 's/^[[:space:]]*system[[:space:]]*=[[:space:]]*//p' /etc/imageinfo/sysinfo 2>/dev/null | head -n1)"
+[ "$sys_image" == "" ] && sys_image="???"
+sys_version="$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*//p' /etc/imageinfo/sysinfo 2>/dev/null | head -n1)"
+[ "$sys_version" == "" ] && sys_version="???"
+date=$(date)
+distro=$(cat /etc/*release 2>/dev/null | grep "PRETTY_NAME" | cut -d "=" -f 2- | sed 's/"//g')
+[ -z "$distro" ] && [ -x /usr/bin/lsb_release ] && distro=$(lsb_release -s -d)
+kernel="$(uname -sr)"
+raspi=$(tr -d '\0' 2>/dev/null < /proc/device-tree/model)
+processor_name=$(grep "model name" /proc/cpuinfo | cut -d ' ' -f3- | awk {'print $0'} | head -1)
+[ -z "$processor_name" ] && processor_name=$(lscpu | grep 'Model name' | cut -d ' ' -f3- | sed 's/^ *//')
+processor_count=$(grep -ioP 'processor\t:' /proc/cpuinfo | wc -l)
+uptime=$(uptime -p | cut -d' ' -f2-)
+ip_local=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1')
+ip_global=$(curl -s4 ifconfig.co)
+W="\e[0;39m"
+G="\e[1;32m"
+
+printf "\033[1;32mWelcome to %s.\n\033[0m" "Kiosk-OS"
+echo
+printf "\033[1;37mSystem information as of: $date\033[0m"
+echo -e "
+$W  Distro......: $W$distro
+$W  Kernel......: $W$kernel
+$W  Raspi.......: $W$raspi
+$W  CPU.........: $W$processor_name ($G$processor_count$W vCPU)
+$W  SYS Image...: $W$sys_image (v$G$sys_version$W)
+
+$W  Uptime......: $W$uptime
+$W  IP local....: $W$ip_local
+$W  IP global...: $W$ip_global
+$W"

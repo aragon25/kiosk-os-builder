@@ -1,22 +1,84 @@
 #!/bin/sh
 
-[ -e /scripts/imgldr_functions ] && . /scripts/imgldr_functions || exit 1
+# rootfs, bootfs and sqfs-image are temporarily mounted at this point.
 
-local_mode_check() {
-  if [ -f "${ROOT_MOUNT}/CONFIG/mode" ]; then
-    IMGLDR_MODE="$(cat "${ROOT_MOUNT}/CONFIG/mode" 2>/dev/null)"
-    if [ "$IMGLDR_MODE" = "LOCAL" ] && [ -f "${ROOT_MOUNT}/sbin/init" ]; then
-      imgldr_pretty_text "      !!! LOCAL BOOT !!!"
-      BOOT="local"
-      mkdir -p /conf
-      touch /conf/param.conf
-      echo "BOOT=$BOOT" >> "/conf/param.conf"
+SCRIPT_PATH="$(realpath "$0")"
+SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+
+[ -e "${SCRIPT_DIR}/functions" ] && . "${SCRIPT_DIR}/functions" || exit 1
+
+get_variables() {
+  [ -f "${CONFIG_DIR}/mode" ] && IMAGE_MODE="$(cat "${CONFIG_DIR}/mode" 2>/dev/null)"
+  [ -f "${CONFIG_DIR}/reset" ] && IMAGE_RESET="$(cat "${CONFIG_DIR}/reset" 2>/dev/null)"
+  if [ "$IMAGE_MODE" != "RAMDISK" ] && [ "$IMAGE_MODE" != "DEVELOPER" ] && [ "$IMAGE_MODE" != "STORED" ]; then
+    imgldr_dialog --timeout 5 --title "!!! ERROR !!!" --infobox "\nConfig file: '/CONFIG/mode'\n\nInvalid mode value: '${IMAGE_MODE}'\nDefaulting to 'RAMDISK'..." 9 45
+    IMAGE_MODE="RAMDISK"
+  fi
+  if [ "$IMAGE_RESET" != "USER" ] && [ "$IMAGE_RESET" != "CONFIG" ] && [ "$IMAGE_RESET" != "ALL" ] && [ "$IMAGE_RESET" != "NONE" ]; then
+    imgldr_dialog --timeout 5 --title "!!! ERROR !!!" --infobox "\nConfig file: '/CONFIG/reset'\n\nInvalid reset value: '${IMAGE_RESET}'\nDefaulting to 'NONE'..." 9 45
+    IMAGE_RESET="NONE"
+  fi
+  mkdir -p /conf
+  touch /conf/imgldr.conf
+  if [ -f "${FIRSTBOOT_CONF}" ]; then
+    local fb_conf
+    fb_conf=$(sed -n 's/^[[:space:]]*USERNAME[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_USERNAME=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*PASSWORD[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_PASSWORD=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_HOSTNAME=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*WIFI_COUNTRY[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_WIFI_COUNTRY=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*WIFI_SSID[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_WIFI_SSID=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*WIFI_KEY[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_WIFI_KEY=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*WIFI_HIDDEN[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_WIFI_HIDDEN=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*KEYMAP[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_KEYMAP=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*TIMEZONE[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_TIMEZONE=$fb_conf" >> "/conf/imgldr.conf"
+    fb_conf=$(sed -n 's/^[[:space:]]*ENABLE_SSH[[:space:]]*=[[:space:]]*//p' "$FIRSTBOOT_CONF" 2>/dev/null | head -n1)
+    [ -n "$fb_conf" ] && echo "FB_ENABLE_SSH=$fb_conf" >> "/conf/imgldr.conf"
+  fi
+  echo "IMAGE_MODE=$IMAGE_MODE" >> "/conf/imgldr.conf"
+  echo "IMAGE_RESET=$IMAGE_RESET" >> "/conf/imgldr.conf"
+  imgldr_clear_screen
+}
+
+repair_bootfs() {
+  local restored_boot
+  local filepath
+  local filename
+  if [ "$IMAGE_MODE" != "DEVELOPER" ]; then
+    if [ -d ${SQFS_MOUNT}/BOOT ]; then
+      for filepath in ${SQFS_MOUNT}/BOOT/*; do
+        filename=$(basename "${filepath}")
+        if [ -f "${filepath}" ] && ! diff "${filepath}" "${BOOT_MOUNT}/${filename}" >/dev/null 2>&1; then
+          [ -z "${restored_boot}" ] && imgldr_dialog --timeout 2 --title "!!! INFO !!!" --infobox "\nRestoring boot partition data...\n\nPlease wait..." 7 45
+          cp -f "${filepath}" "${BOOT_MOUNT}/${filename}"
+          restored_boot="yes"
+        fi
+      done
+      for filepath in ${SQFS_MOUNT}/BOOT/overlays/*; do
+        filename=$(basename "${filepath}")
+        if [ -f "${filepath}" ] && ! diff "${filepath}" "${BOOT_MOUNT}/overlays/${filename}" >/dev/null 2>&1; then
+          [ -z "${restored_boot}" ] && imgldr_dialog --timeout 2 --title "!!! INFO !!!" --infobox "\nRestoring boot partition data...\n\nPlease wait..." 7 45
+          cp -f "${filepath}" "${BOOT_MOUNT}/overlays/${filename}"
+          restored_boot="yes"
+        fi
+      done
+      [ -n "${restored_boot}" ] && imgldr_do_reboot 5 "\nBoot partition repaired!\n\nRebooting..."
+    else
+      panic "BOOT folder not found in ${SQFS_MOUNT}!\nboot partition might be outdated..."
     fi
   fi
 }
 
 remove_vanilla_scripts() {
-  [ "$BOOT" = "local" ] && return
   if [ -e "/scripts/init-bottom/overlayroot" ]; then
     echo "#!/bin/sh" > /scripts/init-bottom/overlayroot
     echo "exit 0" >> /scripts/init-bottom/overlayroot
@@ -44,7 +106,64 @@ remove_vanilla_scripts() {
   fi
 }
 
-local_mode_check
+build_dirs() {
+  # Build rootfs base directory structure
+  mkdir -p "${CONFIG_DIR}" "${IMAGES_DIR}" "${USERDATA_DIR}" "${STORAGE_DIR}"
+  mkdir -p "${USERDATA_DIR}/data" "${USERDATA_DIR}/work"
+  chown -fR 0:0 "${CONFIG_DIR}" "${IMAGES_DIR}"
+  chmod -fR u=rwX,g=rX,o=rX "${CONFIG_DIR}" "${IMAGES_DIR}"
+  chown -f 0:0 "${USERDATA_DIR}" "${USERDATA_DIR}/data" "${USERDATA_DIR}/work"
+  chmod -f u=rwX,g=rX,o=rX "${USERDATA_DIR}" "${USERDATA_DIR}/data" "${USERDATA_DIR}/work"
+  chown -f 0:0 "${STORAGE_DIR}"
+  chmod -f u=rwX,g=rX,o=rX "${STORAGE_DIR}"
+  if [ "$IMAGE_MODE" = "DEVELOPER" ]; then
+    mkdir -p "${DEVELOPER_DIR}"
+    chown -f 0:0 "${DEVELOPER_DIR}"
+    chmod -f u=rwX,g=rX,o=rX "${DEVELOPER_DIR}"
+  fi
+}
+
+system_reset() {
+  if [ "$IMAGE_RESET" != "NONE" ]; then
+    local reset_type="userdata"
+    [ "$IMAGE_RESET" = "CONFIG" ] && reset_type="config"
+    [ "$IMAGE_RESET" = "ALL" ] && reset_type="factory"
+    imgldr_dialog --timeout 2 --title "!!! INFO !!!" --infobox "\n$reset_type reset...\n\nPlease wait..." 7 45
+    if [ "$IMAGE_RESET" = "USER" ]; then 
+      rm -rf "${USERDATA_DIR}/"*
+      rm -rf "${STORAGE_DIR}/"*
+    fi
+    [ "$IMAGE_RESET" = "CONFIG" ] && rm -rf "${CONFIG_DIR}/"*
+    if [ "$IMAGE_RESET" = "ALL" ]; then 
+      rm -rf "${USERDATA_DIR}/"*
+      rm -rf "${STORAGE_DIR}/"*
+      rm -rf "${CONFIG_DIR}/"*
+    fi
+    rm -f "${CONFIG_DIR}/reset" >/dev/null 2>&1
+    echo "NONE" > "${CONFIG_DIR}/reset"
+    imgldr_do_reboot 5 "System reset completed..."
+  fi
+  if [ "$IMAGE_MODE" != "DEVELOPER" ] && [ -d "${DEVELOPER_DIR}" ]; then
+    imgldr_dialog --timeout 2 --title "!!! LEAVING DEVELOPER MODE !!!" --infobox "\nDeveloper folder and its\ncontents will be removed now!..." 7 45
+    rm -rf "${DEVELOPER_DIR}"
+    imgldr_do_reboot 5 "System reset completed..."
+  fi
+}
+
+auto_reboot_addon() {
+  local auto_reboot="$(cat "${STORAGE_DIR}/auto-reboot_boot.state" 2>/dev/null)"
+  if [ "${auto_reboot}" = "bootup" ]; then
+    echo "shutdown" > "${STORAGE_DIR}/auto-reboot_boot.state"
+    imgldr_do_reboot 3 "Auto-reboot: Rebooting after unrecognized shutdown..."
+  fi
+}
+
+get_variables
+repair_bootfs
 remove_vanilla_scripts
+build_dirs
+[ -f "${SCRIPT_DIR}/update" ] && . "${SCRIPT_DIR}/update" && update_start
+system_reset
+auto_reboot_addon
 
 exit 0
