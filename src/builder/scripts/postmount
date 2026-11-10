@@ -40,51 +40,51 @@ prepare_system() {
   fi
 
   # hwclock_fix
-  if [ ! -f "${STORAGE_DIR}/fake-hwclock" ]; then
+  if [ ! -f "${STORAGE_DIR}/autosave/fake-hwclock" ]; then
     if [ -f "${rootmnt}/etc/date/fake-hwclock" ]; then 
-      cp -f "${rootmnt}/etc/date/fake-hwclock" "${STORAGE_DIR}/fake-hwclock"
+      cp -f "${rootmnt}/etc/date/fake-hwclock" "${STORAGE_DIR}/autosave/fake-hwclock"
     else
-      echo "2025-06-01 15:20:00" > "${STORAGE_DIR}/fake-hwclock"
+      echo "2025-06-01 15:20:00" > "${STORAGE_DIR}/autosave/fake-hwclock"
     fi
   fi
-  if [ ! -f "${STORAGE_DIR}/clock" ]; then
+  if [ ! -f "${STORAGE_DIR}/autosave/clock" ]; then
     if [ -f "${rootmnt}/etc/date/clock" ]; then 
-      cp -f "${rootmnt}/etc/date/clock" "${STORAGE_DIR}/clock"
+      cp -f "${rootmnt}/etc/date/clock" "${STORAGE_DIR}/autosave/clock"
     else
-      echo "1748784000" > "${STORAGE_DIR}/clock" #date -d "2025-06-01 15:20:00" +%s
+      echo "1748784000" > "${STORAGE_DIR}/autosave/clock" #date -d "2025-06-01 15:20:00" +%s
     fi
   fi
   if [ -f "${rootmnt}/etc/fake-hwclock.data" ]; then
     rm -f "${rootmnt}/etc/fake-hwclock.data"
-    ln -s "/var/sqfs/storage/fake-hwclock" "${rootmnt}/etc/fake-hwclock.data"
+    ln -s "/var/sqfs/storage/autosave/fake-hwclock" "${rootmnt}/etc/fake-hwclock.data"
   fi
   if [ -f "${rootmnt}/var/lib/systemd/clock" ]; then
     rm -f "${rootmnt}/var/lib/systemd/clock"
-    ln -s "/var/sqfs/storage/clock" "${rootmnt}/var/lib/systemd/clock"
+    ln -s "/var/sqfs/storage/autosave/clock" "${rootmnt}/var/lib/systemd/clock"
   fi
 
   # auto-reboot_fix
-  if [ ! -f "${STORAGE_DIR}/auto-reboot_boot.state" ]; then 
+  if [ ! -f "${STORAGE_DIR}/autosave/auto-reboot_boot.state" ]; then 
     if [ -f "${rootmnt}/var/lib/auto-reboot/boot.state" ] && [ ! -L "${rootmnt}/var/lib/auto-reboot/boot.state" ]; then 
-      mv -f "${rootmnt}/var/lib/auto-reboot/boot.state" "${STORAGE_DIR}/auto-reboot_boot.state"
+      mv -f "${rootmnt}/var/lib/auto-reboot/boot.state" "${STORAGE_DIR}/autosave/auto-reboot_boot.state"
     else
-      echo "shutdown" > "${STORAGE_DIR}/auto-reboot_boot.state"
+      echo "shutdown" > "${STORAGE_DIR}/autosave/auto-reboot_boot.state"
     fi
   fi
   if [ ! -L "${rootmnt}/var/lib/auto-reboot/boot.state" ]; then
     mkdir -p "${rootmnt}/var/lib/auto-reboot"
-    ln -s "/var/sqfs/storage/auto-reboot_boot.state" "${rootmnt}/var/lib/auto-reboot/boot.state"
+    ln -s "/var/sqfs/storage/autosave/auto-reboot_boot.state" "${rootmnt}/var/lib/auto-reboot/boot.state"
   fi
-  local auto_reboot="$(cat "${STORAGE_DIR}/auto-reboot_boot.state" 2>/dev/null)"
+  local auto_reboot="$(cat "${STORAGE_DIR}/autosave/auto-reboot_boot.state" 2>/dev/null)"
   if [ "${auto_reboot}" = "bootup" ]; then
-    echo "shutdown" > "${STORAGE_DIR}/auto-reboot_boot.state"
+    echo "shutdown" > "${STORAGE_DIR}/autosave/auto-reboot_boot.state"
     imgldr_do_reboot 3 "Auto-reboot: Rebooting after unrecognized shutdown..."
   fi
 
   # activate initramfs-splash plymouth theme if configured or restore previous theme
   current_theme=$(sed -n 's/^[[:space:]]*Theme[[:space:]]*=[[:space:]]*//p' "${rootmnt}/etc/plymouth/plymouthd.conf" 2>/dev/null | head -n1)
   if [ "$current_theme" != "initramfs-splash" ] && [ "$current_theme" != "" ]; then
-    echo "$current_theme" > "${STORAGE_DIR}/plymouth_savedtheme"
+    echo "$current_theme" > "${STORAGE_DIR}/autosave/plymouth_savedtheme"
   fi
   saved_theme="$(awk 'NR==1 {print $1}' ${STORAGE_DIR}/plymouth_savedtheme 2>/dev/null)"
   if [ "$saved_theme" != "" ]; then

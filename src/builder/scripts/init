@@ -12,11 +12,11 @@ get_variables() {
   [ -f "${CONFIG_DIR}/mode" ] && IMAGE_MODE="$(cat "${CONFIG_DIR}/mode" 2>/dev/null)"
   [ -f "${CONFIG_DIR}/reset" ] && IMAGE_RESET="$(cat "${CONFIG_DIR}/reset" 2>/dev/null)"
   if [ "$IMAGE_MODE" != "RAMDISK" ] && [ "$IMAGE_MODE" != "DEVELOPER" ] && [ "$IMAGE_MODE" != "STORED" ]; then
-    imgldr_dialog --timeout 5 --title "!!! ERROR !!!" --infobox "\nConfig file: '/CONFIG/mode'\n\nInvalid mode value: '${IMAGE_MODE}'\nDefaulting to 'RAMDISK'..." 9 45
+    imgldr_dialog --timeout 5 --title "!!! ERROR !!!" --infobox "\nConfig file: '${CONFIG_DIR}/mode'\n\nInvalid mode value: '${IMAGE_MODE}'\nDefaulting to 'RAMDISK'..." 9 45
     IMAGE_MODE="RAMDISK"
   fi
   if [ "$IMAGE_RESET" != "USER" ] && [ "$IMAGE_RESET" != "CONFIG" ] && [ "$IMAGE_RESET" != "ALL" ] && [ "$IMAGE_RESET" != "NONE" ]; then
-    imgldr_dialog --timeout 5 --title "!!! ERROR !!!" --infobox "\nConfig file: '/CONFIG/reset'\n\nInvalid reset value: '${IMAGE_RESET}'\nDefaulting to 'NONE'..." 9 45
+    imgldr_dialog --timeout 5 --title "!!! ERROR !!!" --infobox "\nConfig file: '${CONFIG_DIR}/reset'\n\nInvalid reset value: '${IMAGE_RESET}'\nDefaulting to 'NONE'..." 9 45
     IMAGE_RESET="NONE"
   fi
   mkdir -p /conf
@@ -110,12 +110,15 @@ build_dirs() {
   # Build rootfs base directory structure
   mkdir -p "${CONFIG_DIR}" "${IMAGES_DIR}" "${USERDATA_DIR}" "${STORAGE_DIR}"
   mkdir -p "${USERDATA_DIR}/data" "${USERDATA_DIR}/work"
+  mkdir -p "${STORAGE_DIR}/.kiosk"
+  chattr -R -i "${STORAGE_DIR}/.kiosk"
+  mkdir -p "${STORAGE_DIR}/autosave"
   chown -fR 0:0 "${CONFIG_DIR}" "${IMAGES_DIR}"
   chmod -fR u=rwX,g=rX,o=rX "${CONFIG_DIR}" "${IMAGES_DIR}"
   chown -f 0:0 "${USERDATA_DIR}" "${USERDATA_DIR}/data" "${USERDATA_DIR}/work"
   chmod -f u=rwX,g=rX,o=rX "${USERDATA_DIR}" "${USERDATA_DIR}/data" "${USERDATA_DIR}/work"
-  chown -f 0:0 "${STORAGE_DIR}"
-  chmod -f u=rwX,g=rX,o=rX "${STORAGE_DIR}"
+  chown -f 0:0 "${STORAGE_DIR}" "${STORAGE_DIR}/.kiosk" "${STORAGE_DIR}/autosave"
+  chmod -f u=rwX,g=rX,o=rX "${STORAGE_DIR}" "${STORAGE_DIR}/.kiosk" "${STORAGE_DIR}/autosave"
   if [ "$IMAGE_MODE" = "DEVELOPER" ]; then
     mkdir -p "${DEVELOPER_DIR}"
     chown -f 0:0 "${DEVELOPER_DIR}"
@@ -130,13 +133,18 @@ system_reset() {
     [ "$IMAGE_RESET" = "ALL" ] && reset_type="factory"
     imgldr_dialog --timeout 2 --title "!!! INFO !!!" --infobox "\n$reset_type reset...\n\nPlease wait..." 7 45
     if [ "$IMAGE_RESET" = "USER" ]; then 
+      chattr -R -i "${USERDATA_DIR}"
       rm -rf "${USERDATA_DIR}/"*
+      chattr -R -i "${STORAGE_DIR}"
       rm -rf "${STORAGE_DIR}/"*
     fi
     [ "$IMAGE_RESET" = "CONFIG" ] && rm -rf "${CONFIG_DIR}/"*
     if [ "$IMAGE_RESET" = "ALL" ]; then 
+      chattr -R -i "${USERDATA_DIR}"
       rm -rf "${USERDATA_DIR}/"*
+      chattr -R -i "${STORAGE_DIR}"
       rm -rf "${STORAGE_DIR}/"*
+      chattr -R -i "${CONFIG_DIR}"
       rm -rf "${CONFIG_DIR}/"*
     fi
     rm -f "${CONFIG_DIR}/reset" >/dev/null 2>&1
@@ -145,15 +153,16 @@ system_reset() {
   fi
   if [ "$IMAGE_MODE" != "DEVELOPER" ] && [ -d "${DEVELOPER_DIR}" ]; then
     imgldr_dialog --timeout 2 --title "!!! LEAVING DEVELOPER MODE !!!" --infobox "\nDeveloper folder and its\ncontents will be removed now!..." 7 45
+    chattr -R -i "${DEVELOPER_DIR}"
     rm -rf "${DEVELOPER_DIR}"
     imgldr_do_reboot 5 "System reset completed..."
   fi
 }
 
 auto_reboot_addon() {
-  local auto_reboot="$(cat "${STORAGE_DIR}/auto-reboot_boot.state" 2>/dev/null)"
+  local auto_reboot="$(cat "${STORAGE_DIR}/autosave/auto-reboot_boot.state" 2>/dev/null)"
   if [ "${auto_reboot}" = "bootup" ]; then
-    echo "shutdown" > "${STORAGE_DIR}/auto-reboot_boot.state"
+    echo "shutdown" > "${STORAGE_DIR}/autosave/auto-reboot_boot.state"
     imgldr_do_reboot 3 "Auto-reboot: Rebooting after unrecognized shutdown..."
   fi
 }

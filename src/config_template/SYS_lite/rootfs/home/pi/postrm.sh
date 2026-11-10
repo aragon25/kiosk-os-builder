@@ -1,5 +1,4 @@
 #!/bin/bash
-#!/bin/bash
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"

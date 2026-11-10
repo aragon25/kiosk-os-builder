@@ -18,8 +18,8 @@ build_sys_mount() {
   firstboot_tasks() {
     ## perform firstboot setup tasks
     # reload firstboot config from stored image data if exists to apply original changes
-    if [ -f "${STORAGE_DIR}/firstboot" ]; then
-      local firstboot_conf="${STORAGE_DIR}/firstboot"
+    if [ -f "${STORAGE_DIR}/.kiosk/firstboot" ]; then
+      local firstboot_conf="${STORAGE_DIR}/.kiosk/firstboot"
       FB_USERNAME=$(sed -n 's/^[[:space:]]*USERNAME[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
       FB_PASSWORD=$(sed -n 's/^[[:space:]]*PASSWORD[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
       FB_HOSTNAME=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
@@ -31,9 +31,9 @@ build_sys_mount() {
       FB_TIMEZONE=$(sed -n 's/^[[:space:]]*TIMEZONE[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
       FB_ENABLE_SSH=$(sed -n 's/^[[:space:]]*ENABLE_SSH[[:space:]]*=[[:space:]]*//p' "$firstboot_conf" 2>/dev/null | head -n1)
     elif [ -f "${FIRSTBOOT_CONF}" ]; then
-      cp -f "${FIRSTBOOT_CONF}" "${STORAGE_DIR}/firstboot"
+      cp -f "${FIRSTBOOT_CONF}" "${STORAGE_DIR}/.kiosk/firstboot"
     else
-      touch "${STORAGE_DIR}/firstboot"
+      touch "${STORAGE_DIR}/.kiosk/firstboot"
     fi
     # trixie fixes
     rm -f "${SYS_MOUNT}/etc/issue.d/IP.issue" >/dev/null 2>&1
@@ -43,22 +43,22 @@ build_sys_mount() {
     #rebuildMachineID
     rm -f "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
     rm -f "${SYS_MOUNT}/var/lib/dbus/machine-id" >/dev/null 2>&1
-    [ -f "${STORAGE_DIR}/machine-id" ] && cp -f "${STORAGE_DIR}/machine-id" "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
+    [ -f "${STORAGE_DIR}/.kiosk/machine-id" ] && cp -f "${STORAGE_DIR}/.kiosk/machine-id" "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
     chroot "${SYS_MOUNT}" systemd-machine-id-setup >/dev/null 2>&1
     chmod 644 "${SYS_MOUNT}/etc/machine-id" >/dev/null 2>&1
     ln -fs /etc/machine-id "${SYS_MOUNT}/var/lib/dbus/machine-id" >/dev/null 2>&1
-    [ ! -f "${STORAGE_DIR}/machine-id" ] && cp -f "${SYS_MOUNT}/etc/machine-id" "${STORAGE_DIR}/machine-id" >/dev/null 2>&1
+    [ ! -f "${STORAGE_DIR}/.kiosk/machine-id" ] && cp -f "${SYS_MOUNT}/etc/machine-id" "${STORAGE_DIR}/.kiosk/machine-id" >/dev/null 2>&1
     #rebuildSSHKeyPairs
     mkdir -p "${SYS_MOUNT}/etc/ssh" >/dev/null 2>&1
     rm -f "${SYS_MOUNT}/etc/ssh/"*"_key"* >/dev/null 2>&1
-    if ls "${STORAGE_DIR}/ssh_keys/"*"_key"* >/dev/null 2>&1; then
-      cp -f "${STORAGE_DIR}/ssh_keys/"*"_key"* "${SYS_MOUNT}/etc/ssh/" >/dev/null 2>&1
+    if ls "${STORAGE_DIR}/.kiosk/ssh_keys/"*"_key"* >/dev/null 2>&1; then
+      cp -f "${STORAGE_DIR}/.kiosk/ssh_keys/"*"_key"* "${SYS_MOUNT}/etc/ssh/" >/dev/null 2>&1
       chmod 600 "${SYS_MOUNT}/etc/ssh/"*"_key"* >/dev/null 2>&1
     else
       chroot "${SYS_MOUNT}" ssh-keygen -A >/dev/null 2>&1
-      mkdir -p "${STORAGE_DIR}/ssh_keys" >/dev/null 2>&1
-      rm -f "${STORAGE_DIR}/ssh_keys/"*"_key"* >/dev/null 2>&1
-      cp -f "${SYS_MOUNT}/etc/ssh/"*"_key"* "${STORAGE_DIR}/ssh_keys/" >/dev/null 2>&1
+      mkdir -p "${STORAGE_DIR}/.kiosk/ssh_keys" >/dev/null 2>&1
+      rm -f "${STORAGE_DIR}/.kiosk/ssh_keys/"*"_key"* >/dev/null 2>&1
+      cp -f "${SYS_MOUNT}/etc/ssh/"*"_key"* "${STORAGE_DIR}/.kiosk/ssh_keys/" >/dev/null 2>&1
     fi
     #SetupSystemUser
     [ -z "$FB_USERNAME" ] && FB_USERNAME="admin"
@@ -68,22 +68,20 @@ build_sys_mount() {
     local first_usergid=$(awk -F: -v uid="$first_userid" '$3 == uid { print $4; exit }' "${SYS_MOUNT}/etc/passwd" 2>/dev/null)
     local first_usergname=$(awk -F: -v gid="$first_usergid" '$3 == gid { print $1; exit }' "${SYS_MOUNT}/etc/group" 2>/dev/null)
     local first_userhome=$(awk -F: -v uid="$first_userid" '$3 == uid { print $6; exit }' "${SYS_MOUNT}/etc/passwd" 2>/dev/null)
-    if [ ! -f "${USERDATA_DIR}/data/kiosk/etc/passwd" ]; then
-      if [ -n "$first_username" ]; then
-        chroot "${SYS_MOUNT}" usermod -p $FB_PASSWORD $first_username >/dev/null 2>&1
-        chroot "${SYS_MOUNT}" groupmod -n admin $first_usergname >/dev/null 2>&1
-        chroot "${SYS_MOUNT}" usermod -d "/home/admin" $first_username >/dev/null 2>&1
-        chroot "${SYS_MOUNT}" usermod -l $FB_USERNAME $first_username >/dev/null 2>&1
-        rm -rf "${SYS_MOUNT}${first_userhome}" >/dev/null 2>&1
-        cp -rf "${SYS_MOUNT}/etc/skel"/. "${SYS_MOUNT}/home/admin" >/dev/null 2>&1
-        chown -R ${first_userid}:${first_usergid} "${SYS_MOUNT}/home/admin" >/dev/null 2>&1
-        rm -f "${SYS_MOUNT}/etc/sudoers.d/010_"*"-nopasswd" >/dev/null 2>&1
-        echo "$FB_USERNAME ALL=(ALL) NOPASSWD: ALL" > "${SYS_MOUNT}/etc/sudoers.d/010_admin-nopasswd"
-        chown 0:0 "${SYS_MOUNT}/etc/sudoers.d/010_admin-nopasswd" >/dev/null 2>&1
-        chmod -f 440 "${SYS_MOUNT}/etc/sudoers.d/010_admin-nopasswd" >/dev/null 2>&1
-      else
-        imgldr_dialog --timeout 5 --title "!!! WARNING !!!" --infobox "\nFailed to setup first user!\nNo existing user found in system." 12 50
-      fi
+    if [ -n "$first_username" ]; then
+      chroot "${SYS_MOUNT}" usermod -p $FB_PASSWORD $first_username >/dev/null 2>&1
+      chroot "${SYS_MOUNT}" groupmod -n $FB_USERNAME $first_usergname >/dev/null 2>&1
+      chroot "${SYS_MOUNT}" usermod -d "/home/$FB_USERNAME" $first_username >/dev/null 2>&1
+      chroot "${SYS_MOUNT}" usermod -l $FB_USERNAME $first_username >/dev/null 2>&1
+      rm -rf "${SYS_MOUNT}${first_userhome}" >/dev/null 2>&1
+      cp -rf "${SYS_MOUNT}/etc/skel"/. "${SYS_MOUNT}/home/$FB_USERNAME" >/dev/null 2>&1
+      chown -R ${first_userid}:${first_usergid} "${SYS_MOUNT}/home/$FB_USERNAME" >/dev/null 2>&1
+      rm -f "${SYS_MOUNT}/etc/sudoers.d/010_"*"-nopasswd" >/dev/null 2>&1
+      echo "$FB_USERNAME ALL=(ALL) NOPASSWD: ALL" > "${SYS_MOUNT}/etc/sudoers.d/010_firstuser-nopasswd"
+      chown 0:0 "${SYS_MOUNT}/etc/sudoers.d/010_firstuser-nopasswd" >/dev/null 2>&1
+      chmod -f 440 "${SYS_MOUNT}/etc/sudoers.d/010_firstuser-nopasswd" >/dev/null 2>&1
+    else
+      imgldr_dialog --timeout 5 --title "!!! WARNING !!!" --infobox "\nFailed to setup first user!\nNo existing user found in system." 12 50
     fi
     # Disable swapfile in rammode
     if [ "$IMAGE_MODE" = "RAMDISK" ]; then
@@ -193,9 +191,9 @@ EOF
     fi
     # add ramsafer in RAMDISK mode
     if [ "$IMAGE_MODE" = "RAMDISK" ]; then
-      cp -f "${SCRIPT_DIR}/files/kiosk-ramsafer.service" "${SYS_MOUNT}/etc/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
-      chown 0:0 "${SYS_MOUNT}/etc/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
-      chmod 755 "${SYS_MOUNT}/etc/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
+      cp -f "${SCRIPT_DIR}/files/kiosk-ramsafer.service" "${SYS_MOUNT}/lib/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
+      chown 0:0 "${SYS_MOUNT}/lib/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
+      chmod 644 "${SYS_MOUNT}/lib/systemd/system/kiosk-ramsafer.service" >/dev/null 2>&1
       cp -f "${SCRIPT_DIR}/files/kiosk-ramsaferd" "${SYS_MOUNT}/usr/bin/kiosk-ramsaferd" >/dev/null 2>&1
       chown 0:0 "${SYS_MOUNT}/usr/bin/kiosk-ramsaferd" >/dev/null 2>&1
       chmod 755 "${SYS_MOUNT}/usr/bin/kiosk-ramsaferd" >/dev/null 2>&1
@@ -214,6 +212,8 @@ EOF
     cp -f "${SCRIPT_DIR}/files/motd_sysinfo" "${SYS_MOUNT}/etc/update-motd.d/10-sysinfo" >/dev/null 2>&1
     chown 0:0 "${SYS_MOUNT}/etc/update-motd.d/10-sysinfo"
     chmod 755 "${SYS_MOUNT}/etc/update-motd.d/10-sysinfo"
+    # make firstboot files unchangeable
+    chattr -R +i "${STORAGE_DIR}/.kiosk"
     # end here in developer mode
     [ "$IMAGE_MODE" = "DEVELOPER" ] && return 0
     # disable package managers and rpi-update in non-developer mode

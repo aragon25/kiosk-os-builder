@@ -14,18 +14,26 @@ SCRIPTDIR="$(readlink -f "$0")"
 SCRIPTNAME="$(basename "$SCRIPTDIR")"
 SCRIPTBASENAME="$(basename "$SCRIPTDIR" ".sh")"
 SCRIPTDIR="$(dirname "$SCRIPTDIR")"
-OUTPUTDIR="$SCRIPTDIR/build"
+BUILDDIR="$SCRIPTDIR/build"
 RELEASEDIR="$SCRIPTDIR/release"
 CONFIGFILE="$SCRIPTDIR/$SCRIPTBASENAME.conf"
 USERID="${SUDO_UID:-$UID}"
 GROUPID="$(id -g $USERID)"
-LOGFILE="$OUTPUTDIR/build.log"
+LOGFILE="$BUILDDIR/build.log"
+FAIL_REASON=""
+ROOT_DEV="NOT_MOUNTED"
+BOOT_DEV="NOT_MOUNTED"
+LOOP_DEV="NOT_MOUNTED"
 EXITCODE=0
 
 #check commands
 for i in "$@"
 do
   case $i in
+    -i=*)
+    IMAGE_LOAD=${i#-i=}
+    shift # past argument
+    ;;
     -b=*)
     BASE_BOOT=${i#-b=}
     shift # past argument
@@ -73,7 +81,13 @@ do
   esac
 done
 [ "$CMD" == "" ] && CMD="MENU"
-FAIL_REASON=""
+
+function format_image_load() {
+  case "${IMAGE_LOAD}" in
+    BASE_IMAGE) echo "." ;;
+    *) echo "${IMAGE_LOAD}" ;;
+  esac
+}
 
 function set_base_perms() {
   local filetype
@@ -117,6 +131,7 @@ function config_read_all(){
   [ -z "$VERSION" ] && VERSION=$(config_read "$CONFIGFILE" VERSION "")
   [ -z "$BRANCH" ] && BRANCH=$(config_read "$CONFIGFILE" BRANCH "")
   [ -z "$SERVER" ] && SERVER=$(config_read "$CONFIGFILE" SERVER "")
+  [ -z "$IMAGE_LOAD" ] && IMAGE_LOAD=$(config_read "$CONFIGFILE" IMAGE_LOAD "")
   [ -z "$BASE_BOOT" ] && BASE_BOOT=$(config_read "$CONFIGFILE" BASE_BOOT "base/bootfs")
   BASE_BOOT=$(echo "$BASE_BOOT" | sed "s#^/\(.*\)#\1#" | sed "s#\(.*\)/\$#\1#")
   [ -z "$BASE_ROOT" ] && BASE_ROOT=$(config_read "$CONFIGFILE" BASE_ROOT "base/rootfs")
@@ -153,107 +168,10 @@ function cool_down () {
   return 0
 }
 
-function write_perms () {
-  local exitcode=0
-  touch "$OUTPUTDIR/boot_mount/test.dummy" >/dev/null 2>&1 || exitcode=1
-  touch "$OUTPUTDIR/root_mount/test.dummy" >/dev/null 2>&1 || exitcode=1
-  rm -f "$OUTPUTDIR/boot_mount/test.dummy" >/dev/null 2>&1
-  rm -f "$OUTPUTDIR/root_mount/test.dummy" >/dev/null 2>&1
-  return $exitcode
-}
-
-function umount_devices () {
-  cool_down
-  umount $BOOT_DEV >/dev/null 2>&1
-  umount $ROOT_DEV >/dev/null 2>&1
-  sleep 2
-  return 0
-}
-
-function mount_devices () {
-  local exitcode=0
-  umount_devices
-  mount -w $BOOT_DEV "$OUTPUTDIR/boot_mount" >/dev/null 2>&1
-  [ $? -ne 0 ] && exitcode=1
-  mount -w $ROOT_DEV "$OUTPUTDIR/root_mount" >/dev/null 2>&1
-  [ $? -ne 0 ] && exitcode=1
-  sleep 2
-  write_perms || exitcode=1
-  [ $exitcode -ne 0 ] && umount_devices
-  return $exitcode
-}
-
-function expand_device () { #partition endblock
-  umount_devices >/dev/null 2>&1
-  printf "%sB\n" "$2" | parted -m "$MAIN_DEV" u b resizepart "$1" ---pretend-input-tty >/dev/null 2>&1
-  cool_down
-  e2fsck -f -y ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  resize2fs -f ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  e2fsck -f -y ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  return 0
-}
-
-function shrink_device () { #partition startblock
-  umount_devices >/dev/null 2>&1
-  e2fsck -f -y ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  resize2fs -f -M ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  e2fsck -f -y ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  local filesystem_info=$(tune2fs -l ${MAIN_DEV}${1})
-  local block_count=$(echo "$filesystem_info" | grep -e "^Block count:" | cut -d ":" -f 2 | sed 's/^ *//g')
-  local block_size=$(echo "$filesystem_info" | grep -e "^Block size:" | cut -d ":" -f 2 | sed 's/^ *//g')
-  local sys_min_end=$((block_count * block_size))
-  sys_min_end=$((sys_min_end + $2 - 1))
-  printf "%sB\nyes\n" "$sys_min_end" | parted -m "$MAIN_DEV" u b resizepart "$1" ---pretend-input-tty >/dev/null 2>&1
-  cool_down
-  e2fsck -f -y ${MAIN_DEV}${1} >/dev/null 2>&1
-  cool_down
-  return 0
-}
-
-function create_install_script () {
-  cat <<EOF | sudo tee "$OUTPUTDIR/images/install_update" >/dev/null 2>&1
-#!/bin/sh
-install_boot() {
-  mkdir -p /mnt/sysimg /mnt/oemimg
-  mount -r -t ext4 /mnt/tmproot/IMAGES/update/system.img /mnt/sysimg >/dev/null 2>&1
-  [ -f "/mnt/tmproot/IMAGES/update/oem.img" ] && mount -r -t ext4 /mnt/tmproot/IMAGES/update/oem.img /mnt/oemimg >/dev/null 2>&1
-  if [ -f /mnt/tmproot/IMAGES/update/oem.img ] && ls /mnt/oemimg/BOOT/* >/dev/null 2>&1; then
-    find /mnt/oemimg/BOOT -maxdepth 1 -mindepth 1 -exec cp -rf {} /mnt/tmpboot/ \;
-  elif ls /mnt/sysimg/BOOT/* >/dev/null 2>&1; then
-    find /mnt/sysimg/BOOT -maxdepth 1 -mindepth 1 -exec cp -rf {} /mnt/tmpboot/ \;
-  fi
-  sync >/dev/null 2>&1
-  umount /mnt/sysimg >/dev/null 2>&1
-  umount /mnt/oemimg >/dev/null 2>&1
-  return 0
-}
-install_images() {
-  find /mnt/tmproot/IMAGES -maxdepth 1 -mindepth 1 -not -name 'update' -exec rm -rf {} \;
-  find /mnt/tmproot/IMAGES/update -maxdepth 1 -mindepth 1 -not -name 'install_update' -not -name 'update' -exec mv -f {} /mnt/tmproot/IMAGES/ \;
-  rm -rf /mnt/tmproot/SETUP >/dev/null 2>&1
-  rm -rf /mnt/tmproot/OEM >/dev/null 2>&1
-  rm -rf /mnt/tmproot/OVERLAY/data >/dev/null 2>&1
-  return 0
-}
-install_boot
-install_images
-exit 0
-EOF
-  echo $(sha512sum "$OUTPUTDIR/images/install_update" | awk 'NR==1 {print $1}') > "$OUTPUTDIR/images/install_update.sha512"
-  return 0
-}
-
 function check_superuser () {
   if [ $UID -ne 0 ]; then
     FAIL_REASON="not superuser"
-    EXITCODE=1
-    return 1
+    EXITCODE=1 && return $EXITCODE
   fi
   return 0
 }
@@ -263,98 +181,193 @@ function check_commands () {
   for cmd in grep cut sed parted fdisk findmnt resize2fs e2fsck tune2fs zip md5sum sha512sum whiptail; do
     if ! command -v $cmd >/dev/null; then
       FAIL_REASON="$cmd not found"
-      EXITCODE=1
-      return 1
+      EXITCODE=1 && return $EXITCODE
     fi
   done
   return 0
 }
 
-function check_getvar_dev () {
-  MAIN_DEV="/dev/$DEVICE"
-  local MAIN_NAME=$(echo "$MAIN_DEV" | cut -d "/" -f 3)
-  ROOT_NUM="2"
-  BOOT_NUM="1"
-  ROOT_DEV="${MAIN_DEV}${ROOT_NUM}"
-  BOOT_DEV="${MAIN_DEV}${BOOT_NUM}"
-  local ROOT_NAME=$(echo "$ROOT_DEV" | cut -d "/" -f 3)
-  local BOOT_NAME=$(echo "$BOOT_DEV" | cut -d "/" -f 3)
-  if ! parted -ms "$MAIN_DEV" print >/dev/null 2>&1; then
-    FAIL_REASON="$MAIN_DEV not found"
-    EXITCODE=1
-    return 1
+function create_folders () {
+  umount_main_img
+  umount_main_dev
+  rm -rf "$BUILDDIR"
+  mkdir -p "$BUILDDIR/mount_bootfs"
+  mkdir -p "$BUILDDIR/mount_rootfs"
+  mkdir -p "$BUILDDIR/mount_sqfs/base"
+  mkdir -p "$BUILDDIR/mount_sqfs/devel"
+  mkdir -p "$BUILDDIR/mount_final/bootfs"
+  mkdir -p "$BUILDDIR/mount_final/rootfs"
+  mkdir -p "$BUILDDIR/images"
+  mkdir -p "$RELEASEDIR"
+  [ -f "$LOGFILE" ] && rm -f "$LOGFILE"
+  printf "Log File - " >> "$LOGFILE" && date >> "$LOGFILE"
+  set_base_perms "$BUILDDIR"
+  set_base_perms "$RELEASEDIR"
+  return 0
+}
+
+function create_main_img () {
+  local image_name="kiosk_os.img"
+  local image_size=4096
+  local boot_size=512
+  dd if=/dev/zero of="$BUILDDIR/images/${image_name}" bs=1M count=${image_size} status=progress >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not create ${image_name}" && EXITCODE=1 && return $EXITCODE
+  sfdisk "$BUILDDIR/images/${image_name}" >/dev/null 2>&1 <<EOF
+,${boot_size}M,c,*
+,,83,
+EOF
+  [ $? -ne 0 ] && FAIL_REASON="could not create ${image_name}" && EXITCODE=1 && return $EXITCODE
+  local loop_dev=$(losetup -P -f --show "$BUILDDIR/images/${image_name}")
+  mkfs.vfat -F 32 -n "bootfs" "${loop_dev}p1" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not create partition 'bootfs'" && EXITCODE=1
+  mkfs.ext4 -L "rootfs" "${loop_dev}p2" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not create partition 'rootfs'" && EXITCODE=1
+  DISKID=$(fdisk -l "${loop_dev}" | sed -n 's/Disk identifier: 0x\([^ ]*\)/\1/p')
+  losetup -d "${loop_dev}" >/dev/null 2>&1
+  return $EXITCODE
+}
+
+function umount_main_img () {
+  cool_down
+  umount -f "$BUILDDIR/mount_final/bootfs" >/dev/null 2>&1
+  umount -f "$BUILDDIR/mount_final/rootfs" >/dev/null 2>&1
+  cool_down
+  losetup -d "${LOOP_DEV}" >/dev/null 2>&1
+  sleep 2
+  LOOP_DEV="NOT_MOUNTED"
+  return 0
+}
+
+function mount_main_img () {
+  umount_main_img
+  local image_name="kiosk_os.img"
+  LOOP_DEV=$(losetup -P -f --show "$BUILDDIR/images/${image_name}")
+  mount -o x-gvfs-hide -w "${LOOP_DEV}p1" "$BUILDDIR/mount_final/bootfs" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not mount final bootfs" && EXITCODE=1
+  mount -o x-gvfs-hide -w "${LOOP_DEV}p2" "$BUILDDIR/mount_final/rootfs" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not mount final rootfs" && EXITCODE=1
+  [ $EXITCODE -ne 0 ] && umount_main_img
+  return $EXITCODE
+}
+
+function shrink_main_img () {
+  mount_main_img
+  [ $? -ne 0 ] && FAIL_REASON="could not mount image" && EXITCODE=1
+  [ $EXITCODE -ne 0 ] && umount_main_img && return $EXITCODE
+  local image_name="kiosk_os.img"
+  umount -f "$BUILDDIR/mount_final/bootfs" >/dev/null 2>&1
+  umount -f "$BUILDDIR/mount_final/rootfs" >/dev/null 2>&1
+  e2fsck -f -y "${LOOP_DEV}p2" >/dev/null 2>&1
+  resize2fs -M "${LOOP_DEV}p2" >/dev/null 2>&1
+  local part_start_sector=$(partx -g --nr 2 --output START "$BUILDDIR/images/${image_name}" 2>/dev/null | tr -d ' ')
+  local fs_block_size=$(dumpe2fs -h "${LOOP_DEV}p2" 2>/dev/null | grep "Block size:" | awk '{print $3}')
+  local fs_block_count=$(dumpe2fs -h "${LOOP_DEV}p2" 2>/dev/null | grep "Block count:" | awk '{print $3}')
+  local fs_size_bytes=$(( fs_block_count * fs_block_size ))
+  local buffer_bytes=$(( 10 * 1024 * 1024 ))
+  local total_part2_bytes=$(( fs_size_bytes + buffer_bytes ))
+  local part2_sectors=$(( total_part2_bytes / 512 ))
+  local new_size_bytes=$(( (part_start_sector + part2_sectors) * 512 ))
+  sfdisk --no-reread "$BUILDDIR/images/${image_name}" >/dev/null 2>&1 <<EOF
+label-id: ${DISKID}
+,1048576,c,*
+${part_start_sector},${part2_sectors},83
+EOF
+  [ $? -ne 0 ] && FAIL_REASON="could not shrink partition" && EXITCODE=1
+  umount_main_img
+  [ $EXITCODE -ne 0 ] && return $EXITCODE
+  truncate -s "${new_size_bytes}" "$BUILDDIR/images/${image_name}" >/dev/null 2>&1
+  return $EXITCODE
+}
+
+function check_main_dev () {
+  local main_dev="/dev/$DEVICE"
+  local root_num="2"
+  local boot_num="1"
+  ROOT_DEV="${main_dev}${root_num}"
+  BOOT_DEV="${main_dev}${boot_num}"
+  if ! parted -ms "$main_dev" print >/dev/null 2>&1; then
+    FAIL_REASON="$main_dev not found"
+    EXITCODE=1 && return $EXITCODE
   fi
   if [ "$(blkid -o value -s LABEL $BOOT_DEV)" != "bootfs" ]; then
     FAIL_REASON="$BOOT_DEV label not match 'bootfs'"
-    EXITCODE=1
-    return 1
+    EXITCODE=1 && return $EXITCODE
   fi
   if [ "$(blkid -o value -s LABEL $ROOT_DEV)" != "rootfs" ]; then
     FAIL_REASON="$ROOT_DEV label not match 'rootfs'"
-    EXITCODE=1
-    return 1
+    EXITCODE=1 && return $EXITCODE
   fi
   fsck -a $BOOT_DEV >/dev/null 2>&1
   fsck -a $ROOT_DEV >/dev/null 2>&1
   e2fsck -f -y $ROOT_DEV >/dev/null 2>&1
-  local PARTITION_TABLE=$(parted -m "$MAIN_DEV" unit b print | tr -d 'B')
-  local LAST_PART_NUM=$(echo "$PARTITION_TABLE" | tail -n 1 | cut -d ":" -f 1)
-  local MAIN_LINE=$(echo "$PARTITION_TABLE" | grep -e "^${MAIN_DEV}:")
-  local ROOT_LINE=$(echo "$PARTITION_TABLE" | grep -e "^${ROOT_NUM}:")
-  local BOOT_LINE=$(echo "$PARTITION_TABLE" | grep -e "^${BOOT_NUM}:")
-  ROOT_START=$(echo "$ROOT_LINE" | cut -d ":" -f 2)
-  BOOT_START=$(echo "$BOOT_LINE" | cut -d ":" -f 2)
-  ROOT_END=$(echo "$ROOT_LINE" | cut -d ":" -f 3)
-  BOOT_END=$(echo "$BOOT_LINE" | cut -d ":" -f 3)
-  local MAIN_SIZE=$(echo "$MAIN_LINE" | cut -d ":" -f 2)
-  MAIN_END=$((MAIN_SIZE - 1))
-  DISKID=$(fdisk -l "$MAIN_DEV" | sed -n 's/Disk identifier: 0x\([^ ]*\)/\1/p')
-  if [ $ROOT_NUM -ne $LAST_PART_NUM ] ; then
+  local part_table=$(parted -m "$main_dev" unit b print | tr -d 'B')
+  local last_part_num=$(echo "$part_table" | tail -n 1 | cut -d ":" -f 1)
+  if [ $root_num -ne $last_part_num ] ; then
     FAIL_REASON="$ROOT_DEV is not last partition!"
-    EXITCODE=1
-    return 1
+    EXITCODE=1 && return $EXITCODE
   fi
+  return $EXITCODE
+}
+
+function umount_main_dev () {
+  cool_down
+  umount "$BUILDDIR/mount_sqfs/devel" >/dev/null 2>&1
+  umount "$BUILDDIR/mount_sqfs/base" >/dev/null 2>&1
+  cool_down
+  umount $BOOT_DEV >/dev/null 2>&1
+  umount $ROOT_DEV >/dev/null 2>&1
+  sleep 2
+  ROOT_DEV="NOT_MOUNTED"
+  BOOT_DEV="NOT_MOUNTED"
   return 0
 }
 
-function create_folders () {
-  umount_devices
-  rm -rf "$OUTPUTDIR"
-  mkdir -p "$OUTPUTDIR/boot_mount"
-  mkdir -p "$OUTPUTDIR/root_mount"
-  mkdir -p "$OUTPUTDIR/image_mount"
-  mkdir -p "$OUTPUTDIR/images"
-  mkdir -p "$RELEASEDIR/update"
-  [ -f "$LOGFILE" ] && rm -f "$LOGFILE"
-  printf "Log File - " >> "$LOGFILE" && date >> "$LOGFILE"
-  set_base_perms "$OUTPUTDIR"
-  set_base_perms "$RELEASEDIR"
-  return 0
+function mount_main_dev () {
+  local main_dev="/dev/$DEVICE"
+  local root_num="2"
+  local boot_num="1"
+  ROOT_DEV="${main_dev}${root_num}"
+  BOOT_DEV="${main_dev}${boot_num}"
+  umount_main_dev
+  check_main_dev
+  [ $EXITCODE -ne 0 ] && umount_main_dev && return $EXITCODE
+  mount -o x-gvfs-hide -r $BOOT_DEV "$BUILDDIR/mount_bootfs" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not mount bootfs" && EXITCODE=1
+  mount -o x-gvfs-hide -r $ROOT_DEV "$BUILDDIR/mount_rootfs" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not mount rootfs" && EXITCODE=1
+  [ $EXITCODE -ne 0 ] && umount_main_dev && return $EXITCODE
+  if [ "$IMAGE_LOAD" != "ROOT" ]; then
+    if ! mount -o x-gvfs-hide -r -t squashfs "$BUILDDIR/mount_rootfs/IMAGES/$(format_image_load)/system.sqfs" "$BUILDDIR/mount_sqfs/base" >/dev/null 2>&1; then
+      FAIL_REASON="mount /IMAGES/$(format_image_load)/system.sqfs failed!\n"
+      EXITCODE=1
+    fi
+    if [ $EXITCODE -eq 0 ] && [ -d "$BUILDDIR/mount_rootfs/DATA/${IMAGE_LOAD}/devel_data/data" ]; then
+      sleep 2
+      if ! mount -o x-gvfs-hide -r -t overlay overlay \
+        -o lowerdir="$BUILDDIR/mount_sqfs/base/SYSTEM",upperdir="$BUILDDIR/mount_rootfs/DATA/${IMAGE_LOAD}/devel_data/data",workdir="$BUILDDIR/mount_rootfs/DATA/${IMAGE_LOAD}/devel_data/work" "$BUILDDIR/mount_sqfs/devel" >/dev/null 2>&1; then
+        FAIL_REASON="mount developer data overlay failed!\n"
+        EXITCODE=1
+      fi
+    fi
+    sleep 2
+  fi
+  [ $EXITCODE -ne 0 ] && umount_main_dev
+  return $EXITCODE
 }
 
 function gen_boot_folder () {
-  ! ls "$OUTPUTDIR/boot_mount/"* >/dev/null 2>&1 && return 1
-  rm -rf "$OUTPUTDIR/root_mount/System Volume Information" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/.Trash-1000" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/lost+found/."* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/lost+found/"* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/tmp/"* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/var/tmp/"* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/BOOT" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/boot_mount/System Volume Information" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/boot_mount/.Trash-1000" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/boot_mount/lost+found/."* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/boot_mount/lost+found/"* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/boot_mount/."* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/boot_mount/FSCK"*".REC" >/dev/null 2>&1
-  mkdir -p "$OUTPUTDIR/root_mount/BOOT"
-  cp -f "$OUTPUTDIR/boot_mount/initramfs"* "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/kernel"*".img" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/start"*".elf" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/fixup"*".dat" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/bootcode.bin" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/bcm"*".dtb" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  #cp -f "$OUTPUTDIR/boot_mount/config-display.txt" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
+  ! ls "$BUILDDIR/mount_bootfs/"* >/dev/null 2>&1 && return 1
+  rm -rf "$BUILDDIR/mount_final/bootfs/"* >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/BOOT" >/dev/null 2>&1
+  mkdir -p "$BUILDDIR/mount_final/rootfs/BOOT"
+  cp -af "$BUILDDIR/mount_bootfs/initramfs"* "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_bootfs/kernel"*".img" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_bootfs/start"*".elf" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_bootfs/fixup"*".dat" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_bootfs/bootcode.bin" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_bootfs/bcm"*".dtb" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  cp -arf "$BUILDDIR/mount_bootfs/overlays" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  find "$BUILDDIR/mount_bootfs" -maxdepth 1 -mindepth 1 -exec cp -arf {} "$BUILDDIR/mount_final/bootfs" \;
   echo '
 ##################################################
 #       All changes to this file will be         #
@@ -362,8 +375,8 @@ function gen_boot_folder () {
 #                                                #
 #     please use config-custom.txt instead!      #
 ##################################################
-' | cat - "$OUTPUTDIR/boot_mount/config-initramfs.txt" | tee "$OUTPUTDIR/boot_mount/config-initramfs.txt" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/config-initramfs.txt" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
+' | cat - "$BUILDDIR/mount_final/bootfs/config-initramfs.txt" | tee "$BUILDDIR/mount_final/bootfs/config-initramfs.txt" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_final/bootfs/config-initramfs.txt" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
   echo '
 ##################################################
 #       All changes to this file will be         #
@@ -371,194 +384,184 @@ function gen_boot_folder () {
 #                                                #
 #     please use config-custom.txt instead!      #
 ##################################################
-' | cat - "$OUTPUTDIR/boot_mount/config.txt" | tee "$OUTPUTDIR/boot_mount/config.txt" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/boot_mount/config.txt" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
-  cp -rf "$OUTPUTDIR/boot_mount/overlays" "$OUTPUTDIR/root_mount/BOOT/" >/dev/null 2>&1
+' | cat - "$BUILDDIR/mount_final/bootfs/config.txt" | tee "$BUILDDIR/mount_final/bootfs/config.txt" >/dev/null 2>&1
+  cp -af "$BUILDDIR/mount_final/bootfs/config.txt" "$BUILDDIR/mount_final/rootfs/BOOT/" >/dev/null 2>&1
+  touch "$BUILDDIR/mount_final/bootfs/config-custom.txt" >/dev/null 2>&1
   return 0
 }
 
-function gen_system () {
-  ! mount_devices >/dev/null 2>&1 && echo "mount failed!" && return 1
-  local imgldr_ver="$("$OUTPUTDIR/root_mount/usr/bin/initramfs-imgldr" -v 2>/dev/null | perl -pe 'if(($v)=/([0-9]+([.][0-9]+)+)/){print"$v\n";exit}$_=""' 2>/dev/null)"
-  if [ -f "$OUTPUTDIR/root_mount/IMAGES/system.img" ]; then
-    cp -f "$OUTPUTDIR/root_mount/IMAGES/system.img" "$OUTPUTDIR/images/system.img" >/dev/null 2>&1
-    umount_devices >/dev/null 2>&1
-  elif compare_version "$imgldr_ver" "2.5"; then
-    ! gen_boot_folder && echo "create bootfolder failed!" && return 1
-    mkdir -p "$OUTPUTDIR/root_mount/SYSTEM" "$OUTPUTDIR/root_mount/INFO"
-    find "$OUTPUTDIR/root_mount" -maxdepth 1 -mindepth 1 -not -name 'SYSTEM' -not -name 'BOOT' -not -name 'INFO' -exec mv -f {} "$OUTPUTDIR/root_mount/SYSTEM" \;
-    ! echo "${BRANCH} ${VERSION}" > "$OUTPUTDIR/root_mount/INFO/sysinfo" && echo "root: write sysinfo failed!" && return 1
-    chmod -f u=r,g=r,o=r "$OUTPUTDIR/root_mount/INFO/sysinfo"
-    if [ -n "${SERVER}" ]; then
-      ! echo "${SERVER}" > "$OUTPUTDIR/root_mount/INFO/updateserver" && echo "root: write updateserver failed!" && return 1
-      chmod -f u=r,g=r,o=r "$OUTPUTDIR/root_mount/INFO/updateserver"
+function gen_system_folder () {
+  local exitcode=0
+  local base_sys="mount_rootfs"
+  ls "$BUILDDIR/mount_sqfs/base/"* >/dev/null 2>&1 && base_sys="mount_sqfs/base"
+  ls "$BUILDDIR/mount_sqfs/devel/"* >/dev/null 2>&1 && base_sys="mount_sqfs/devel"
+  local imgldr_ver="$("$BUILDDIR/$base_sys/usr/bin/initramfs-imgldr" -v 2>/dev/null | perl -pe 'if(($v)=/([0-9]+([.][0-9]+)+)/){print"$v\n";exit}$_=""' 2>/dev/null)"
+  ! compare_version "$imgldr_ver" "2.7" && echo "initramfs-imgldr is not installed on source or version is too old!\n" && exitcode=1 && return $exitcode
+  rm -rf "$BUILDDIR/mount_final/rootfs/SYSTEM" >/dev/null 2>&1
+  mkdir -p "$BUILDDIR/mount_final/rootfs/SYSTEM"
+  find "$BUILDDIR/$base_sys" -maxdepth 1 -mindepth 1 -not -name 'SYSTEM' -not -name 'BOOT' -not -name 'INFO' -not -name 'IMAGES' -not -name 'CONFIG' -not -name 'DATA' -exec cp -arf {} "$BUILDDIR/mount_final/rootfs/SYSTEM" \;
+  [ $? -ne 0 ] && echo "copy system files failed!\n" && exitcode=1 && return $exitcode
+  for sysfolder in bin lib sbin; do
+    if [ -d "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder" ]; then
+      mkdir -p "$BUILDDIR/mount_final/rootfs/SYSTEM/usr/$sysfolder"
+      mv -f "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder/"* "$BUILDDIR/mount_final/rootfs/SYSTEM/usr/$sysfolder/" >/dev/null 2>&1
     fi
-    if [ -f "$OUTPUTDIR/root_mount/SYSTEM/usr/lib/initramfs-imgldr/imgldr-install_update" ]; then
-      cp -af "$OUTPUTDIR/root_mount/SYSTEM/usr/lib/initramfs-imgldr/imgldr-install_update" "$OUTPUTDIR/root_mount/INFO/install_update" >/dev/null 2>&1
+    rm -rf "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder" >/dev/null 2>&1
+    ln -s usr/$sysfolder "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder" >/dev/null 2>&1
+  done
+  for sysfolder in etc home media mnt opt root srv tmp; do
+    if [ -d "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder" ]; then
+      mkdir -p "$BUILDDIR/mount_final/rootfs/SYSTEM/var/kiosk/$sysfolder"
+      mv -f "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder/"* "$BUILDDIR/mount_final/rootfs/SYSTEM/var/kiosk/$sysfolder/" >/dev/null 2>&1
     fi
-    shrink_device $ROOT_NUM $ROOT_START
-    ! mount_devices >/dev/null 2>&1 && echo "mount failed!" && return 1
-    e4defrag $ROOT_DEV >/dev/null 2>&1
-    dd if=/dev/zero of="$OUTPUTDIR/root_mount/tmpzero.txt" >/dev/null 2>&1
-    rm -f "$OUTPUTDIR/root_mount/tmpzero.txt" >/dev/null 2>&1
-    umount_devices >/dev/null 2>&1
-    dd conv=sparse if="$ROOT_DEV" of="$OUTPUTDIR/images/system.img" >/dev/null 2>&1
-    e2fsck -f -y "$OUTPUTDIR/images/system.img" >/dev/null 2>&1
-    resize2fs -M "$OUTPUTDIR/images/system.img" >/dev/null 2>&1
-    expand_device $ROOT_NUM $ROOT_END
-  else
-    echo "no system image found and initramfs-imgldr is not installed on source device or version is too old!"
-    umount_devices >/dev/null 2>&1
+    rm -rf "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder" >/dev/null 2>&1
+    ln -s var/kiosk/$sysfolder "$BUILDDIR/mount_final/rootfs/SYSTEM/$sysfolder" >/dev/null 2>&1
+  done
+  rm -rf "$BUILDDIR/mount_final/rootfs/System Volume Information" >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/.Trash-1000" >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/lost+found/."* >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/lost+found/"* >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/tmp/"* >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/var/tmp/"* >/dev/null 2>&1
+  truncate -s 0 "$BUILDDIR/mount_final/rootfs/etc/machine-id" >/dev/null 2>&1
+  truncate -s 0 "$BUILDDIR/mount_final/rootfs/var/lib/dbus/machine-id" >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/ssh/ssh_host_"*"_key"* >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/var/lib/dhcp/"* >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/network/interfaces.d/"* >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/wpa_supplicant/wpa_supplicant"*".conf" >/dev/null 2>&1
+  echo "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev" > "$BUILDDIR/mount_final/rootfs/etc/wpa_supplicant/wpa_supplicant.conf"
+  echo "update_config=1" >> "$BUILDDIR/mount_final/rootfs/etc/wpa_supplicant/wpa_supplicant.conf"
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/NetworkManager/system-connections/sqfs_"*".nmconnection" >/dev/null 2>&1
+  [ -f "$BUILDDIR/mount_final/rootfs/etc/dhcpcd.conf" ] && sed -i '/#___IMGLDR_CONFIG_BEGIN___/,/#___IMGLDR_CONFIG_END___/d' "$BUILDDIR/mount_final/rootfs/etc/dhcpcd.conf" >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/vnc-web/vncpasswd.pass" >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/timezone" >/dev/null 2>&1
+  echo "UTC" > "$BUILDDIR/mount_final/rootfs/etc/timezone"
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/localtime" >/dev/null 2>&1
+  ln -s /usr/share/zoneinfo/UTC "$BUILDDIR/mount_final/rootfs/etc/localtime"
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/console-setup/cached_"* >/dev/null 2>&1
+  cat >"$BUILDDIR/mount_final/rootfs/etc/default/keyboard" <<'EOF'
+XKBMODEL="pc105"
+XKBLAYOUT="us"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+
+EOF
+  rm -f "$BUILDDIR/mount_final/rootfs/root/.bash_history" >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/root/.vnc" >/dev/null 2>&1
+  local first_userid=$(awk -F: '$3 >= 1000 && $1 != "nobody" { print $3; exit }' "$BUILDDIR/mount_final/rootfs/etc/passwd" 2>/dev/null)
+  local first_username=$(awk -F: -v uid="$first_userid" '$3 == uid { print $1; exit }' "$BUILDDIR/mount_final/rootfs/etc/passwd" 2>/dev/null)
+  local first_usergid=$(awk -F: -v uid="$first_userid" '$3 == uid { print $4; exit }' "$BUILDDIR/mount_final/rootfs/etc/passwd" 2>/dev/null)
+  local first_usergname=$(awk -F: -v gid="$first_usergid" '$3 == gid { print $1; exit }' "$BUILDDIR/mount_final/rootfs/etc/group" 2>/dev/null)
+  local first_userhome=$(awk -F: -v uid="$first_userid" '$3 == uid { print $6; exit }' "$BUILDDIR/mount_final/rootfs/etc/passwd" 2>/dev/null)
+  if [ -n "$first_username" ]; then
+    rm -rf "$BUILDDIR/mount_final/rootfs$first_userhome" >/dev/null 2>&1
+    cp -arf "$BUILDDIR/mount_final/rootfs/etc/skel"/. "$BUILDDIR/mount_final/rootfs$first_userhome" >/dev/null 2>&1
+    chown -R ${first_userid}:${first_usergid} "$BUILDDIR/mount_final/rootfs$first_userhome" >/dev/null 2>&1
   fi
-  set_base_perms "$OUTPUTDIR/images"
-  return 0
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/cockpit/ws-certs.d/"* >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/nginx/sites-enabled/vnc-web" >/dev/null 2>&1
+  rm -f "$BUILDDIR/mount_final/rootfs/etc/vnc-web/"* >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/var/log/journal/"* >/dev/null 2>&1
+  find "$BUILDDIR/mount_final/rootfs/var/log/" -type f -name "*.log" -exec truncate -s 0 {} + >/dev/null 2>&1
+  find "$BUILDDIR/mount_final/rootfs/var/log/" -type f -name "*.[0-9]" -delete >/dev/null 2>&1
+  find "$BUILDDIR/mount_final/rootfs/var/log/" -type f -name "*.gz" -delete >/dev/null 2>&1
+  truncate -s 0 "$BUILDDIR/mount_final/rootfs/var/log/dmesg" 2>/dev/null
+  truncate -s 0 "$BUILDDIR/mount_final/rootfs/var/log/wtmp" 2>/dev/null
+  truncate -s 0 "$BUILDDIR/mount_final/rootfs/var/log/lastlog" 2>/dev/null
+  truncate -s 0 "$BUILDDIR/mount_final/rootfs/var/log/btmp" 2>/dev/null
+  rm -rf "$BUILDDIR/mount_final/rootfs/var/cache/apt/archives/"* 2>/dev/null
+  rm -rf "$BUILDDIR/mount_final/rootfs/var/lib/apt/lists/"* 2>/dev/null
+  #sed -i "s/127\.0\.1\.1.*$(<"$BUILDDIR/mount_final/rootfs/etc/hostname")/127.0.1.1\traspi/g" "$BUILDDIR/mount_final/rootfs/etc/hosts"
+  sed -i "s/^127.0.1.1.*/127.0.1.1\traspi/" "$BUILDDIR/mount_final/rootfs/etc/hosts" >/dev/null 2>&1
+  echo "raspi" > "$BUILDDIR/mount_final/rootfs/etc/hostname"
+  if -f "$BUILDDIR/mount_final/rootfs/etc/default/crda" 2>/dev/null; then
+      sed -i "s/^REGDOMAIN=.*$/REGDOMAIN=/" "$BUILDDIR/mount_final/rootfs/etc/default/crda" >/dev/null 2>&1
+  fi
+  if grep -q "WirelessEnabled=true" "$BUILDDIR/mount_final/rootfs/var/lib/NetworkManager/NetworkManager.state" 2>/dev/null; then
+    sed -i 's/^WirelessEnabled=.*/WirelessEnabled=false/' "$BUILDDIR/mount_final/rootfs/var/lib/NetworkManager/NetworkManager.state" >/dev/null 2>&1
+  fi
+  local filename
+  for filename in "$BUILDDIR/mount_final/rootfs/var/lib/systemd/rfkill/"*:wlan ; do
+    echo 1 > "$filename"
+  done
+  return $exitcode
 }
 
-function gen_oem () {
-  ! mount_devices >/dev/null 2>&1 && echo "mount failed!" && return 1
-  if [ -f "$OUTPUTDIR/images/system.img" ] && ls "$OUTPUTDIR/root_mount/OEM/"* >/dev/null 2>&1; then
-    ! gen_boot_folder && echo "create bootfolder failed!" && return 1
-    mkdir -p "$OUTPUTDIR/root_mount/INFO"
-    find "$OUTPUTDIR/root_mount" -maxdepth 1 -mindepth 1 -not -name 'OEM' -not -name 'BOOT' -not -name 'INFO' -exec rm -rf {} \;
-    mv -f "$OUTPUTDIR/root_mount/OEM" "$OUTPUTDIR/root_mount/SYSTEM"
-    if [ -f "$OUTPUTDIR/root_mount/SYSTEM/usr/lib/initramfs-imgldr/imgldr-install_update" ]; then
-      cp -af "$OUTPUTDIR/root_mount/SYSTEM/usr/lib/initramfs-imgldr/imgldr-install_update" "$OUTPUTDIR/root_mount/INFO/install_update" >/dev/null 2>&1
-    fi
-    mount -r -t ext4 "$OUTPUTDIR/images/system.img" "$OUTPUTDIR/image_mount"
-    cp -af "$OUTPUTDIR/image_mount/INFO/sysinfo" "$OUTPUTDIR/root_mount/INFO/sysinfo" >/dev/null 2>&1
-    cool_down
-    umount "$OUTPUTDIR/image_mount" >/dev/null 2>&1
-    ! echo "${BRANCH} ${VERSION}" > "$OUTPUTDIR/root_mount/INFO/oeminfo" && echo "root: write oeminfo failed!" && return 1
-    chmod -f u=r,g=r,o=r "$OUTPUTDIR/root_mount/INFO/oeminfo"
-    if [ -n "${SERVER}" ]; then
-      ! echo "${SERVER}" > "$OUTPUTDIR/root_mount/INFO/updateserver" && echo "root: write updateserver failed!" && return 1
-      chmod -f u=r,g=r,o=r "$OUTPUTDIR/root_mount/INFO/updateserver"
-    fi
-    shrink_device $ROOT_NUM $ROOT_START
-    ! mount_devices >/dev/null 2>&1 && echo "mount failed!" && return 1
-    e4defrag $ROOT_DEV >/dev/null 2>&1
-    dd if=/dev/zero of="$OUTPUTDIR/root_mount/tmpzero.txt" >/dev/null 2>&1
-    rm -f "$OUTPUTDIR/root_mount/tmpzero.txt" >/dev/null 2>&1
-    umount_devices >/dev/null 2>&1
-    dd conv=sparse if="$ROOT_DEV" of="$OUTPUTDIR/images/oem.img" >/dev/null 2>&1
-    e2fsck -f -y "$OUTPUTDIR/images/oem.img" >/dev/null 2>&1
-    resize2fs -M "$OUTPUTDIR/images/oem.img" >/dev/null 2>&1
-    expand_device $ROOT_NUM $ROOT_END
-    set_base_perms "$OUTPUTDIR/images"
-  elif [ -f "$OUTPUTDIR/images/system.img" ] && [ -f "$OUTPUTDIR/root_mount/IMAGES/oem.img" ]; then
-    cp -f "$OUTPUTDIR/root_mount/IMAGES/oem.img" "$OUTPUTDIR/images/oem.img" >/dev/null 2>&1
-    umount_devices >/dev/null 2>&1
-  else
-    umount_devices >/dev/null 2>&1
+function gen_info_folder () {
+  rm -rf "$BUILDDIR/mount_final/rootfs/INFO" >/dev/null 2>&1
+  mkdir -p "$BUILDDIR/mount_final/rootfs/INFO"
+  cat >"$BUILDDIR/mount_final/rootfs/INFO/systeminfo" <<EOF
+system=${BRANCH}
+version=${VERSION}
+update=${SERVER}
+EOF
+  chmod -f u=r,g=r,o=r "$BUILDDIR/mount_final/rootfs/INFO/systeminfo"
+  if ls "$SCRIPTDIR/scripts/"* >/dev/null 2>&1; then
+    ( cd "$SCRIPTDIR/scripts" && tar -cf "$BUILDDIR/mount_final/rootfs/INFO/scripts.tar" * >/dev/null 2>&1)
+    [ ! -f "$BUILDDIR/mount_final/rootfs/INFO/scripts.tar" ] && echo "create INFO/scripts.tar failed!" && return 1
   fi
   return 0
 }
 
-function gen_image () {
-  mount_devices >/dev/null 2>&1 || echo "mount failed!"
-  echo "console=serial0,115200 console=tty1 root=PARTUUID=${DISKID}-02 rootfstype=ext4 fsck.repair=yes rootwait FIRSTBOOT fastboot boot=image logo.nologo loglevel=3" > "$OUTPUTDIR/boot_mount/cmdline.txt" || echo "boot: write cmdline failed!"
+function gen_system_image () {
+  local result
+  result=$(gen_boot_folder)
+  [ "$result" != "" ] && FAIL_REASON="$result" && EXITCODE=1 && return $EXITCODE
+  result=$(gen_system_folder)
+  [ "$result" != "" ] && FAIL_REASON="$result" && EXITCODE=1 && return $EXITCODE
+  result=$(gen_info_folder)
+  [ "$result" != "" ] && FAIL_REASON="$result" && EXITCODE=1 && return $EXITCODE
+  find "$BUILDDIR/mount_final/rootfs" -maxdepth 1 -mindepth 1 -not -name 'SYSTEM' -not -name 'BOOT' -not -name 'INFO' -exec rm -rf {} \;
+  mksquashfs "$BUILDDIR/mount_final/rootfs" "$BUILDDIR/images/system.sqfs" >/dev/null 2>&1
+  [ $? -ne 0 ] && FAIL_REASON="could not create system.sqfs" && EXITCODE=1 && return $EXITCODE
+  set_base_perms "$BUILDDIR/images"
+  return 0
+}
+
+function gen_main_image () {
+  local base_sys="mount_rootfs"
+  ls "$BUILDDIR/mount_sqfs/base/"* >/dev/null 2>&1 && base_sys="mount_sqfs/base"
+  ls "$BUILDDIR/mount_sqfs/devel/"* >/dev/null 2>&1 && base_sys="mount_sqfs/devel"
   local default_target="multi-user.target"
-  mount -r -t ext4 "$OUTPUTDIR/images/system.img" "$OUTPUTDIR/image_mount"
-  if [ -e "$OUTPUTDIR/image_mount/SYSTEM/usr/lib/systemd/system/default.target" ]; then
-    default_target="$(readlink -f "$OUTPUTDIR/image_mount/SYSTEM/usr/lib/systemd/system/default.target")"
+  if [ -e "$BUILDDIR/$base_sys/usr/lib/systemd/system/default.target" ]; then
+    default_target="$(readlink -f "$BUILDDIR/$base_sys/usr/lib/systemd/system/default.target")"
     default_target="$(basename "$default_target")"
   fi
-  cool_down
-  umount "$OUTPUTDIR/image_mount" >/dev/null 2>&1
-  if [ -f "$OUTPUTDIR/images/oem.img" ]; then
-    mount -r -t ext4 "$OUTPUTDIR/images/oem.img" "$OUTPUTDIR/image_mount"
-    if [ -e "$OUTPUTDIR/image_mount/SYSTEM/usr/lib/systemd/system/default.target" ]; then
-      default_target="$(readlink -f "$OUTPUTDIR/image_mount/SYSTEM/usr/lib/systemd/system/default.target")"
-      default_target="$(basename "$default_target")"
-    fi
-    cool_down
-    umount "$OUTPUTDIR/image_mount" >/dev/null 2>&1
-  fi
+  echo "console=tty1 root=PARTUUID=${DISKID}-02 rootfstype=ext4 fsck.repair=yes rootwait FIRSTBOOT fastboot logo.nologo loglevel=3" > "$BUILDDIR/mount_final/bootfs/cmdline.txt" || echo "boot: write cmdline failed!"
   if [ "$default_target" == "graphical.target" ]; then
-    sed -i 's/$/ vt.global_cursor_default=0/g' "$OUTPUTDIR/boot_mount/cmdline.txt" || echo "boot: write cmdline failed!"
-    sed -i 's/$/ splash/g' "$OUTPUTDIR/boot_mount/cmdline.txt" || echo "boot: write cmdline failed!"
-    sed -i 's/$/ quiet/g' "$OUTPUTDIR/boot_mount/cmdline.txt" || echo "boot: write cmdline failed!"
+    sed -i 's/$/ vt.global_cursor_default=0/g' "$BUILDDIR/mount_final/bootfs/cmdline.txt" || echo "boot: write cmdline failed!"
+    sed -i 's/$/ splash/g' "$BUILDDIR/mount_final/bootfs/cmdline.txt" || echo "boot: write cmdline failed!"
+    sed -i 's/$/ quiet/g' "$BUILDDIR/mount_final/bootfs/cmdline.txt" || echo "boot: write cmdline failed!"
   fi
-  #echo "console=serial0,115200 console=tty1 root=PARTUUID=${DISKID}-02 rootfstype=ext4 fsck.repair=yes rootwait quiet FIRSTBOOT fastboot boot=image logo.nologo splash loglevel=3 vt.global_cursor_default=0" > "$OUTPUTDIR/boot_mount/cmdline.txt" || echo "boot: write cmdline failed!"
-  if [ -f "$OUTPUTDIR/boot_mount/config-custom.txt" ]; then
-    rm -f "$OUTPUTDIR/boot_mount/config-custom.txt"
-    touch "$OUTPUTDIR/boot_mount/config-custom.txt"
-  fi
-  expand_device $ROOT_NUM $MAIN_END
-  mount_devices >/dev/null 2>&1 || echo "mount failed!"
-  rm -rf "$OUTPUTDIR/root_mount/."* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/"* >/dev/null 2>&1
-  mkdir "$OUTPUTDIR/root_mount/CONFIG" "$OUTPUTDIR/root_mount/IMAGES" "$OUTPUTDIR/root_mount/STORAGE" "$OUTPUTDIR/root_mount/STATIC" "$OUTPUTDIR/root_mount/OVERLAY" >/dev/null 2>&1
-  cp -f "$OUTPUTDIR/images/system.img" "$OUTPUTDIR/root_mount/IMAGES/system.img" >/dev/null 2>&1
-  [ -f "$OUTPUTDIR/images/oem.img" ] && cp -f "$OUTPUTDIR/images/oem.img" "$OUTPUTDIR/root_mount/IMAGES/oem.img" >/dev/null 2>&1
-  echo "KIOSK_ACTIVE=true" > "$OUTPUTDIR/root_mount/STATIC/rpi-kiosk_states" || echo "boot: write rpi-kiosk_states failed!"
-  echo "KIOSK_ADMINMODE=false" >> "$OUTPUTDIR/root_mount/STATIC/rpi-kiosk_states" || echo "boot: write rpi-kiosk_states failed!"
-  #touch "$OUTPUTDIR/root_mount/STATIC/auto-reboot-service_poweroff"
-  echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$OUTPUTDIR/root_mount/STATIC/fake-hwclock" || echo "root: write fake-hwclock failed!"
-  chmod 644 "$OUTPUTDIR/root_mount/STATIC/fake-hwclock"
-  date +%s > "$OUTPUTDIR/root_mount/STATIC/clock" || echo "root: write clock failed!"
-  chmod 644 "$OUTPUTDIR/root_mount/STATIC/clock"
-  rm -rf "$OUTPUTDIR/root_mount/System Volume Information" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/.Trash-1000" >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/lost+found/."* >/dev/null 2>&1
-  rm -rf "$OUTPUTDIR/root_mount/lost+found/"* >/dev/null 2>&1
-  shrink_device $ROOT_NUM $ROOT_START
-  mount_devices >/dev/null 2>&1 || echo "mount failed!"
-  dd if=/dev/zero of="$OUTPUTDIR/boot_mount/tmpzero.txt" >/dev/null 2>&1
-  rm -f "$OUTPUTDIR/boot_mount/tmpzero.txt" >/dev/null 2>&1
-  dd if=/dev/zero of="$OUTPUTDIR/root_mount/tmpzero.txt" >/dev/null 2>&1
-  rm -f "$OUTPUTDIR/root_mount/tmpzero.txt" >/dev/null 2>&1
-  umount_devices >/dev/null 2>&1
-  dd if=$MAIN_DEV status=none bs=512 count=$(fdisk -l | awk '$1 == "'$ROOT_DEV'" { print $3 }') | xz -1c > "$RELEASEDIR/kiosk-os_${BRANCH}-v${VERSION}.img.xz"
-  expand_device $ROOT_NUM $ROOT_END
-  set_base_perms "$OUTPUTDIR/images"
-  set_base_perms "$RELEASEDIR"
+  rm -rf "$BUILDDIR/mount_final/rootfs/."* >/dev/null 2>&1
+  rm -rf "$BUILDDIR/mount_final/rootfs/"* >/dev/null 2>&1
+  mkdir "$BUILDDIR/mount_final/rootfs/CONFIG" "$BUILDDIR/mount_final/rootfs/IMAGES" "$BUILDDIR/mount_final/rootfs/DATA/BASE_IMAGE/config" >/dev/null 2>&1
+  cp -f "$BUILDDIR/images/system.sqfs" "$BUILDDIR/mount_final/rootfs/IMAGES/system.sqfs" >/dev/null 2>&1
+  echo "BASE_IMAGE" > "$BUILDDIR/mount_final/rootfs/CONFIG/image_load" || echo "root: write image_load file failed!"
+  echo "true" > "$BUILDDIR/mount_final/rootfs/CONFIG/auto_cleanup" || echo "root: write auto_cleanup file failed!"
+  echo "RAMDISK" > "$BUILDDIR/mount_final/rootfs/DATA/BASE_IMAGE/config/mode" || echo "root: write mode file failed!"
+  echo "NONE" > "$BUILDDIR/mount_final/rootfs/DATA/BASE_IMAGE/config/reset" || echo "root: write reset file failed!"
   return 0
 }
 
-function gen_update () {
-  echo $(sha512sum "$OUTPUTDIR/images/system.img" | awk 'NR==1 {print $1}') > "$OUTPUTDIR/images/system.img.sha512"
-  [ -f "$OUTPUTDIR/images/oem.img" ] && echo $(sha512sum "$OUTPUTDIR/images/oem.img" | awk 'NR==1 {print $1}') > "$OUTPUTDIR/images/oem.img.sha512"
-  cd "$OUTPUTDIR/images" >/dev/null 2>&1
-  rm -f "$RELEASEDIR/update/kiosk-os_SYS_${BRANCH}-v${VERSION}.zip" >/dev/null 2>&1
-  rm -f "$RELEASEDIR/update/kiosk-os_OEM_${BRANCH}-v${VERSION}.zip" >/dev/null 2>&1
-  zip "$RELEASEDIR/update/kiosk-os_SYS_${BRANCH}-v${VERSION}.zip" "system.img" "system.img.sha512" "install_update" "install_update.sha512" >/dev/null 2>&1
-  [ -f "$OUTPUTDIR/images/oem.img" ] && zip "$RELEASEDIR/update/kiosk-os_OEM_${BRANCH}-v${VERSION}.zip" "oem.img" "oem.img.sha512" "install_update" "install_update.sha512" >/dev/null 2>&1
-  cd "$SCRIPTDIR" >/dev/null 2>&1
-  local script_installed="false"
-  mount -r -t ext4 "$OUTPUTDIR/images/system.img" "$OUTPUTDIR/image_mount"
-  [ -f "$OUTPUTDIR/image_mount/INFO/install_update" ] && script_installed="true"
-  local BRANCH_SYS="$(awk 'NR==1 {print $1}' "$OUTPUTDIR/image_mount/INFO/sysinfo" 2>/dev/null)"
-  local VERSION_SYS="$(awk 'NR==1 {print $2}' "$OUTPUTDIR/image_mount/INFO/sysinfo" 2>/dev/null)"
-  cool_down
-  umount "$OUTPUTDIR/image_mount" >/dev/null 2>&1
-  if [ "$script_installed" == "false" ] && [ -f "$OUTPUTDIR/images/oem.img" ]; then
-    mount -r -t ext4 "$OUTPUTDIR/images/oem.img" "$OUTPUTDIR/image_mount"
-    [ -f "$OUTPUTDIR/image_mount/INFO/install_update" ] && script_installed="true"
-    cool_down
-    umount "$OUTPUTDIR/image_mount" >/dev/null 2>&1
-  fi
-  [ "$script_installed" == "false" ] && create_install_script && script_installed="true"
-  local sha512sum_OEM=$(sha512sum "$RELEASEDIR/update/kiosk-os_OEM_${BRANCH}-v${VERSION}.zip" 2>/dev/null | awk 'NR==1 {print $1}')
-  local sha512sum_SYS=$(sha512sum "$RELEASEDIR/update/kiosk-os_SYS_${BRANCH}-v${VERSION}.zip" 2>/dev/null | awk 'NR==1 {print $1}')
-  [ -n "$sha512sum_OEM" ] && echo "$sha512sum_OEM" > "$RELEASEDIR/update/kiosk-os_OEM_${BRANCH}-v${VERSION}.zip.sha512" || sha512sum_OEM=$sha512sum_SYS
-  echo "$sha512sum_SYS" > "$RELEASEDIR/update/kiosk-os_SYS_${BRANCH}-v${VERSION}.zip.sha512"
-  echo "upd_version=$VERSION" > "$RELEASEDIR/update/${BRANCH}.config"
-  echo "upd_branch=$BRANCH" >> "$RELEASEDIR/update/${BRANCH}.config"
-  echo "upd_download={DOWNLOAD_LINK}" >> "$RELEASEDIR/update/${BRANCH}.config"
-  echo "upd_checksum=$sha512sum_OEM" >> "$RELEASEDIR/update/${BRANCH}.config"
-  if [ -f "$OUTPUTDIR/images/oem.img" ] && [ "$VERSION_SYS" != "" ]; then
-    echo "upd_sys_version=$VERSION_SYS" >> "$RELEASEDIR/update/${BRANCH}.config"
-    echo "upd_sys_branch=$BRANCH_SYS" >> "$RELEASEDIR/update/${BRANCH}.config"
-    echo "upd_sys_download={DOWNLOAD_LINK}" >> "$RELEASEDIR/update/${BRANCH}.config"
-    echo "upd_sys_checksum=$sha512sum_SYS" >> "$RELEASEDIR/update/${BRANCH}.config"
-  fi
-  set_base_perms "$OUTPUTDIR/images"
+function build_release_folder () {
+  mv -f "$BUILDDIR/images/kiosk_os.img" "$RELEASEDIR/kiosk-os_${BRANCH}-v${VERSION}.img"
+  mv -f "$BUILDDIR/images/system.sqfs" "$RELEASEDIR/kiosk-os_${BRANCH}-v${VERSION}.system.sqfs"
+  cat >"$RELEASEDIR/kiosk-os_${BRANCH}-v${VERSION}.update.conf" <<EOF
+system=${BRANCH}
+version=${VERSION}
+download={DOWNLOAD_LINK}
+checksum={SHA512SUM}
+EOF
   set_base_perms "$RELEASEDIR"
-  return 0
 }
 
 function cmd_run() {
+  function umount_all () {
+    umount_main_dev
+    umount_main_img
+  }
   printf "\033c"
   local result
   EXITCODE=0
@@ -571,21 +574,32 @@ function cmd_run() {
   infobox "Check prereqs... "
   check_commands || echo "$FAIL_REASON" >> "$LOGFILE"
   [ $EXITCODE -ne 0 ] && msgbox "$FAIL_REASON" && return $EXITCODE
-  infobox "Check device... "
-  check_getvar_dev || echo "$FAIL_REASON" >> "$LOGFILE"
+  infobox "Check device $DEVICE... "
+  check_main_dev || echo "$FAIL_REASON" >> "$LOGFILE"
   [ $EXITCODE -ne 0 ] && msgbox "$FAIL_REASON" && return $EXITCODE
-  infobox "Generate system.img..."
-  result=$(gen_system)
-  [ "$result" != "" ] && echo "$result" >> "$LOGFILE" && msgbox "$result" && return 1
-  infobox "Generate oem.img..."
-  result=$(gen_oem)
-  [ "$result" != "" ] && echo "$result" >> "$LOGFILE" && msgbox "$result" && return 1
-  infobox "Generate main image..."
-  result=$(gen_image)
-  [ "$result" != "" ] && echo "$result" >> "$LOGFILE" && msgbox "$result" && return 1
-  infobox "Generate update pack..."
-  result=$(gen_update)
-  [ "$result" != "" ] && echo "$result" >> "$LOGFILE" && msgbox "$result" && return 1
+  infobox "Create main image container... "
+  create_main_img || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && msgbox "$FAIL_REASON" && return $EXITCODE
+  infobox "Mount main image container... "
+  mount_main_img || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
+  infobox "Mount device $DEVICE... "
+  mount_main_dev || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
+  infobox "Generate system.sqfs... "
+  gen_system_image || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
+  infobox "Generate main image... "
+  gen_main_image || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
+  infobox "umount build dirs... "
+  umount_all
+  infobox "Finalize main image... "
+  shrink_main_img || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
+  infobox "Build Release... "
+  build_release_folder || echo "$FAIL_REASON" >> "$LOGFILE"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
   echo "no errors!" >> "$LOGFILE"
   return 0
 }
@@ -594,11 +608,6 @@ function cmd_basefiles() {
   printf "\033c"
   local result
   EXITCODE=0
-  # infobox "Check files... "
-  # if ! ls "$SCRIPTDIR/$BASE_BOOT/"* >/dev/null 2>&1 && ! ls "$SCRIPTDIR/$BASE_ROOT/"* >/dev/null 2>&1; then
-  #   result="No source files found!\n{SCRIPT_DIR}/$BASE_BOOT\n{SCRIPT_DIR}/$BASE_ROOT"
-  # fi
-  # [ "$result" != "" ] && echo "$result" >> "$LOGFILE" && msgbox "$result" && return 1
   infobox "Check superuser... "
   check_superuser || echo "$FAIL_REASON" >> "$LOGFILE"
   [ $EXITCODE -ne 0 ] && msgbox "$FAIL_REASON" && return $EXITCODE
@@ -609,31 +618,33 @@ function cmd_basefiles() {
   check_commands || echo "$FAIL_REASON" >> "$LOGFILE"
   [ $EXITCODE -ne 0 ] && msgbox "$FAIL_REASON" && return $EXITCODE
   infobox "Check device... "
-  check_getvar_dev || echo "$FAIL_REASON" >> "$LOGFILE"
+  check_main_dev || echo "$FAIL_REASON" >> "$LOGFILE"
   [ $EXITCODE -ne 0 ] && msgbox "$FAIL_REASON" && return $EXITCODE
-  infobox "Mount device..."
-  ! mount_devices >/dev/null 2>&1 && msgbox "mounting failed!" && return 1
+  infobox "Mount device $DEVICE... "
+  local temp_IMAGE_LOAD="$IMAGE_LOAD"
+  IMAGE_LOAD="ROOT"
+  mount_main_dev || echo "$FAIL_REASON" >> "$LOGFILE"
+  IMAGE_LOAD="$temp_IMAGE_LOAD"
+  [ $EXITCODE -ne 0 ] && umount_all && msgbox "$FAIL_REASON" && return $EXITCODE
   infobox "Copy files..."
   if ls "$SCRIPTDIR/$BASE_BOOT/"* >/dev/null 2>&1; then
     set_base_perms "$SCRIPTDIR/$BASE_BOOT"
     cd $SCRIPTDIR/$BASE_BOOT >/dev/null 2>&1
-    find . -mindepth 1 -type f -exec cp --preserve=mode --parents -f {} "$OUTPUTDIR/boot_mount" \;
+    find . -mindepth 1 -type f -exec cp --preserve=mode --parents -f {} "$BUILDDIR/mount_bootfs" \;
     [ $? -ne 0 ] && result="Copy files failed!\n{SCRIPT_DIR}/$BASE_BOOT"
     cd "$SCRIPTDIR" >/dev/null 2>&1
   fi
   if ls "$SCRIPTDIR/$BASE_ROOT/"* >/dev/null 2>&1; then
     set_base_perms "$SCRIPTDIR/$BASE_ROOT"
     cd $SCRIPTDIR/$BASE_ROOT >/dev/null 2>&1
-    find . -mindepth 1 -type f -exec cp --preserve=mode --parents -f {} "$OUTPUTDIR/root_mount" \;
+    find . -mindepth 1 -type f -exec cp --preserve=mode --parents -f {} "$BUILDDIR/mount_rootfs" \;
     [ $? -ne 0 ] && result="Copy files failed!\n{SCRIPT_DIR}/$BASE_ROOT"
     cd "$SCRIPTDIR" >/dev/null 2>&1
   fi
-  if [ -f "$OUTPUTDIR/root_mount/IMAGES/system.img" ]; then
-    sed -i 's|SETUPMODE[^ ]* \{0,1\}||g' "$OUTPUTDIR/boot_mount/cmdline.txt"
-    sed -i 's|[ \t]*$||' "$OUTPUTDIR/boot_mount/cmdline.txt"
-    sed -i 's/$/ SETUPMODE/g' "$OUTPUTDIR/boot_mount/cmdline.txt"
+  if [ -f "$BUILDDIR/mount_rootfs/IMAGES/$(format_image_load)/system.sqfs" ]; then
+    echo "DEVELOPER" > "$BUILDDIR/mount_rootfs/DATA/${IMAGE_LOAD}/config/mode"
   fi
-  umount_devices >/dev/null 2>&1
+  umount_main_dev >/dev/null 2>&1
   [ "$result" != "" ] && printf "$result" >> "$LOGFILE" && msgbox "$result" && return 1
   echo "no errors!" >> "$LOGFILE"
   return 0
@@ -681,6 +692,9 @@ function cmd_menu() {
   local server
   local start_runable
   local base_runable
+  local menu_image_root
+  local menu_image_base
+  local menu_image_custom
   check_superuser || echo "Could not start: $FAIL_REASON"
   [ $EXITCODE -ne 0 ] && return $EXITCODE
   check_commands || echo "Could not start: $FAIL_REASON"
@@ -695,22 +709,26 @@ function cmd_menu() {
     [ -n "$BRANCH" ] && branch=$BRANCH || branch="unset"
     [ -n "$VERSION" ] && version=$VERSION || version="unset"
     [ -n "$SERVER" ] && server=$SERVER || server="unset"
+    [ -z "$IMAGE_LOAD" ] && IMAGE_LOAD="ROOT"
+    ( [ -z "$BASE_BOOT" ] || [ "$BASE_BOOT" == "." ] || [ "$BASE_BOOT" == "/." ] ) && BASE_BOOT="base/bootfs"
+    ( [ -z "$BASE_ROOT" ] || [ "$BASE_ROOT" == "." ] || [ "$BASE_ROOT" == "/." ] ) && BASE_ROOT="base/rootfs"
     [ -n "$DEVICE" ] && [ -n "$BRANCH" ] && [ -n "$VERSION" ] && start_runable="START" || start_runable="N/A"
     [ -n "$DEVICE" ] && ( ls "$SCRIPTDIR/$BASE_BOOT/"* >/dev/null 2>&1 || ls "$SCRIPTDIR/$BASE_ROOT/"* >/dev/null 2>&1 ) && base_runable="BASEFILES" || base_runable="N/A"
     menu_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" \
       --menu "" \
-      $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) $(( $bash_lines - 15 )) \
+      $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) $(( $bash_lines - 14 )) \
       "DEVICE  " "$device" \
       "BRANCH  " "$branch" \
       "VERSION  " "$version" \
       "SERVER  " "$server" \
       "BASE_BOOT  " "$BASE_BOOT" \
       "BASE_ROOT  " "$BASE_ROOT" \
+      "IMAGE_LOAD  " "$IMAGE_LOAD" \
       "  " "" \
       "$start_runable  " "start creating images" \
       "$base_runable  " "copy basefiles to disk" 3>&1 1>&2 2>&3)
     case $menu_sel in
-      1)
+      "  ")
         #
       ;;
       "DEVICE  ")
@@ -718,7 +736,7 @@ function cmd_menu() {
         if [ "${disklist}" != "" ]; then
           menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --radiolist \
             "Choose disk:" \
-            $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) $(( $bash_lines - 15 )) \
+            $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) $(( $bash_lines - 14 )) \
             $disklist 3>&1 1>&2 2>&3)
           DEVICE=$menu_sub_sel
         else
@@ -729,37 +747,55 @@ function cmd_menu() {
       "BRANCH  ")
         menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --inputbox \
           "Input BRANCH:" \
-          $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) \
+          $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) \
           "$BRANCH" 3>&1 1>&2 2>&3)
         BRANCH=$menu_sub_sel
       ;;
       "VERSION  ")
         menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --inputbox \
           "Input VERSION:" \
-          $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) \
+          $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) \
           "$VERSION" 3>&1 1>&2 2>&3)
         VERSION=$menu_sub_sel
       ;;
       "SERVER  ")
         menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --inputbox \
           "Input SERVER:" \
-          $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) \
+          $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) \
           "$SERVER" 3>&1 1>&2 2>&3)
         SERVER=$menu_sub_sel
       ;;
       "BASE_BOOT  ")
         menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --inputbox \
           "Input BASE_BOOT:" \
-          $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) \
+          $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) \
           "$BASE_BOOT" 3>&1 1>&2 2>&3)
         BASE_BOOT=$menu_sub_sel
       ;;
       "BASE_ROOT  ")
         menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --inputbox \
           "Input BASE_ROOT:" \
-          $(( $bash_lines - 8 )) $(( $bash_columns - 8 )) \
+          $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) \
           "$BASE_ROOT" 3>&1 1>&2 2>&3)
         BASE_ROOT=$menu_sub_sel
+      ;;
+      "IMAGE_LOAD  ")
+        [ "$IMAGE_LOAD" == "ROOT" ] && menu_image_root="ON" || menu_image_root="OFF"
+        [ "$IMAGE_LOAD" == "BASE_IMAGE" ] && menu_image_base="ON" || menu_image_base="OFF"
+        ( [ "$IMAGE_LOAD" != "ROOT" ] && [ "$IMAGE_LOAD" != "BASE_IMAGE" ] ) && menu_image_custom="ON" || menu_image_custom="OFF"
+        menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --radiolist \
+          "Select image to load:" \
+          $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) $(( $bash_lines - 14 )) \
+          "ROOT" "rootfs" "$menu_image_root" \
+          "BASE_IMAGE" "rootfs/IMAGES/system.sqfs" "$menu_image_base" \
+          "CUSTOM" "rootfs/IMAGES/{CUSTOM}/system.sqfs" "$menu_image_custom" 3>&1 1>&2 2>&3)
+        if [ "$menu_sub_sel" == "CUSTOM" ]; then
+          menu_sub_sel=$(whiptail --title "$SCRIPT_TITLE - v$SCRIPT_VERSION $menu_title" --inputbox \
+            "Input image name:" \
+            $(( $bash_lines - 7 )) $(( $bash_columns - 8 )) \
+            "" 3>&1 1>&2 2>&3)
+        fi
+        IMAGE_LOAD=$menu_sub_sel
       ;;
       "START  ")
         cmd_run
@@ -796,7 +832,6 @@ function cmd_print_help() {
   echo "-v, --version           print version info and exit"
   echo "-h, --help              print this help and exit"
   echo " "
-  echo "If not all needed informations was given then opens menu"
   echo " "
   echo "Author: aragon25 <aragon25.01@web.de>"
 }

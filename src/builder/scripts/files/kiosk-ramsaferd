@@ -1,5 +1,46 @@
 #!/bin/bash
-counter=0
+
+##############################################
+##                                          ##
+##  kiosk-ramsafer daemon                   ##
+##                                          ##
+##############################################
+
+#get some variables
+SCRIPT_TITLE="kiosk-ramsafer daemon"
+SCRIPT_VERSION="1.0"
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+
+#check commands
+for i in "$@"
+do
+  case $i in
+    --service)
+    [ "$CMD" == "" ] && CMD="service" || CMD="help"
+    shift # past argument
+    ;;
+    -v|--version)
+    [ "$CMD" == "" ] && CMD="version" || CMD="help"
+    shift # past argument
+    ;;
+    -h|--help)
+    CMD="help"
+    shift # past argument
+    ;;
+    *)
+    if [ "$i" != "" ]
+    then
+      echo "Unknown option: $i"
+      exit 1
+    fi
+    ;;
+  esac
+done
+
+function cmd_service() {
+  local counter=0
   while true; do
     if [ $counter -le 0 ]; then
       find /var/log -type f -exec truncate -s 0 {} \; >/dev/null 2>&1
@@ -12,3 +53,24 @@ counter=0
     fi
     sleep 60
   done
+}
+
+function cmd_print_version() {
+  echo "$SCRIPT_TITLE v$SCRIPT_VERSION"
+}
+
+function cmd_print_help() {
+  echo "Usage: $SCRIPT_NAME [OPTION]"
+  echo "$SCRIPT_TITLE v$SCRIPT_VERSION"
+  echo " "
+  echo "-v, --version           print version info and exit"
+  echo "-h, --help              print this help and exit"
+  echo " "
+  echo "Author: aragon25 <aragon25.01@web.de>"
+}
+
+[[ "$CMD" == "version" ]] && cmd_print_version
+[[ "$CMD" == "help" ]] && cmd_print_help
+[[ "$CMD" == "service" ]] && cmd_service
+
+exit $EXITCODE

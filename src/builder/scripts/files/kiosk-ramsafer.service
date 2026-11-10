@@ -7,7 +7,7 @@ After=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/kiosk-os-ramsafer
+ExecStart=/usr/bin/kiosk-ramsaferd --service
 User=root
 
 [Install]

@@ -9,6 +9,8 @@ USERDATA_DIR="${IMAGE_DATA}/user_data"
 DEVELOPER_DIR="${IMAGE_DATA}/devel_data"
 IMAGES_DIR="${ROOT_MOUNT}/IMAGES"
 SYS_MOUNT="/mnt/sys_final"
+[ -f "${CONFIG_DIR}/mode" ] || echo "RAMDISK" > "${CONFIG_DIR}/mode"
+[ -f "${CONFIG_DIR}/reset" ] || echo "NONE" > "${CONFIG_DIR}/reset"
 
 imgldr_clear_screen() {
   command -v clear >/dev/null 2>&1 && clear

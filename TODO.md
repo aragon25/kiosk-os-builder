@@ -11,10 +11,10 @@ initramfs skripte:
 - [x] neue firstboot daten importieren
 - [x] bestimmte änderungen nicht im developer mode machen, z.B. splash screens, ...
 - [x] mode datei erstellen (welcher mode ist gestartet?)
-- [ ] dialog benutzen statt pretty_text
+- [x] dialog benutzen statt pretty_text
 - [ ] update anpassen
-- [x] motd skript generieren (siehe kiosk-os-configurator.sh)
-- [x] im ram modus platz generieren (wie original auch als service)
+- [ ] motd skript generieren (siehe kiosk-os-configurator.sh)
+- [ ] im ram modus platz generieren (wie original auch als service)
 - [ ] 
 
 service paket (muss installiert sein):
@@ -25,6 +25,14 @@ service paket (muss installiert sein):
 - [ ] auto-installer automatisch starten lassen?
 - [ ] cleanup für developer mode -> datei für builder erstellen danach
 - [ ] imgldr version prüfen im developer modus vor finalisierung
+- [ ] 
+
+
+
+andere repos
+- [ ] auto-reboot
+- [ ] vnc-web
+- [ ] rpi-kiosk
 - [ ] 
 
 - [ ] Test version 1.4
